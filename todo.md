@@ -12,8 +12,10 @@
 
 ## 이번 주 (10/13 ~ 10/18)
 
-- [ ] PCAPdroid 설치, 수집할 앱 5개 정하기
-- [ ] 직접 수집 시작 — 매일 앱마다 5분, 파일명 `앱_날짜_순번.pcap` (2~3주 계속)
+- [x] 분류 대상 정하기 — 앱 분류: 유튜브·네이버웹툰·인스타 / 인스타 화면 분류: 릴스·피드·탐색 탭 (README 2절)
+- [ ] PCAPdroid 설치
+- [ ] 직접 수집 시작 — 매일 라벨 6개 × 5분 (하루 30분), 파일명 `라벨_날짜_순번.pcap` (2~3주 계속)
+- [ ] 첫날 수집 후 `python -m src.preprocess` 실행 → 라벨별 플로우 수, 화면 분류 파일의 「처음 10초」 플로우 확인 → `--skip-first` 값 정하기
 - [ ] VS Code 확장 설치: Python, Jupyter
 - [x] Python 3.10 이상 확인, 가상환경 만들기 — Python 3.12, `.venv`
 - [x] `pip install cesnet-datazoo torch scikit-learn pandas matplotlib streamlit` — `requirements.txt`
@@ -31,7 +33,7 @@
 - [ ] 논문: SoK: Decoding the Enigma of Encrypted Network Traffic Classifiers
 - [ ] 논문: Wang et al. 2017 (1D-CNN)
 - [ ] CESNET-QUIC22 데이터 구조 파악 (PPI 열, 앱 라벨, 주차별 분할) — PPI 행 순서·라벨 인코딩은 라이브러리 소스로 확인함 (CLAUDE.md)
-- [ ] 직접 수집 진행 상황 점검 (앱별 파일 수, 날짜 분포) — `python -m src.preprocess --status`
+- [ ] 직접 수집 진행 상황 점검 (라벨별 파일 수, 날짜 분포) — `python -m src.preprocess --status`
 
 ## 2단계 — 전처리 · 특징 추출 (10월 말 ~ 11월 초)
 
@@ -40,7 +42,8 @@
 - [ ] IP·포트·SNI가 입력에 들어가지 않는지 확인
 - [ ] 직접 수집 데이터를 날짜 단위로 학습/시험 분할 — `src/data.py` 작성됨
 - [ ] 직접 수집에서 TCP(TLS) 플로우도 쓸지, QUIC만 쓸지 정하기 (CESNET은 QUIC만)
-- [ ] 직접 수집 데이터 통계 정리 (앱별 플로우 수)
+- [ ] 실제 pcap에서 QUIC 중간 연결 제외가 맞게 되는지 확인 (`quic.header_form`이 tshark에서 제대로 나오는지)
+- [ ] 직접 수집 데이터 통계 정리 (라벨별 플로우 수)
 
 ## 3단계 — 모델 학습 · 성능 비교 (11월)
 
@@ -48,8 +51,9 @@
 - [ ] `src/models.py`: 작은 Transformer — 뼈대 작성됨, 실제 데이터로 학습 전
 - [ ] `src/train.py`: 학습·평가 (정확도 + macro-F1, 혼동 행렬) — 뼈대 작성됨, 실제 데이터로 학습 전
 - [ ] CESNET-QUIC22로 CNN vs Transformer
-- [ ] 직접 수집 데이터로 CNN vs Transformer
-- [ ] 결과 표 정리 (데이터셋별 × 모델별)
+- [ ] 직접 수집 앱 분류(`--task app`)로 CNN vs Transformer
+- [ ] 직접 수집 인스타 화면 분류(`--task screen`)로 CNN vs Transformer
+- [ ] 결과 표 정리 (CESNET / 앱 분류 / 인스타 화면 분류 × 모델별)
 - [ ] (선택) 랜덤포레스트 기준선
 - [ ] (선택) ISCX VPN-nonVPN 2016 비교
 
@@ -58,6 +62,6 @@
 - [ ] `app.py` (Streamlit): pcap 업로드 → 플로우별 분류 → 앱별 표·차트
 - [ ] 시연용 pcap 준비 — 직접 수집 중 학습에 쓰지 않은 날짜분
 - [ ] 처리량 측정 (초당 처리 플로우 수), 저장량 기록
-- [ ] 한계 정리 (라벨 노이즈, PCAPdroid VPN 방식, 데이터 규모)
+- [ ] 한계 정리 (라벨 노이즈, 인스타 화면 라벨의 선로딩 트래픽, PCAPdroid VPN 방식, 데이터 규모)
 - [ ] 최종 보고서
 - [ ] 발표 자료 · 포스터 (정식 과제명 + 부제)
