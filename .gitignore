@@ -1,0 +1,15 @@
+# 데이터 — 저장소 밖 D:/datasets/ 에 둔다
+data/
+*.pcap
+*.pcapng
+*.npz
+
+# 학습 결과 (모델 가중치·지표)
+runs/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
