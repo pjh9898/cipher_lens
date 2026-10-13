@@ -2,18 +2,30 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import src.preprocess as preprocess
 from src.config import DIR, IPT, N_PACKETS, SIZE
-from src.preprocess import flows_from_packets, packets_from_tshark, parse_pcap_name
+from src.preprocess import build_self_collected, flows_from_packets, packets_from_tshark, parse_pcap_name
 
 PHONE = "10.0.0.2"
 
 
 def tcp(t, src, sport, dst, dport, payload, seq, flags):
-    return dict(time=t, src=src, dst=dst, sport=sport, dport=dport, proto="tcp", payload=payload, seq=seq, flags=flags)
+    return dict(time=t, src=src, dst=dst, sport=sport, dport=dport, proto="tcp", payload=payload, seq=seq, flags=flags,
+                quic_long=False)
 
 
-def udp(t, src, sport, dst, dport, payload):
-    return dict(time=t, src=src, dst=dst, sport=sport, dport=dport, proto="udp", payload=payload, seq=np.nan, flags=np.nan)
+def udp(t, src, sport, dst, dport, payload, quic_long=False):
+    return dict(time=t, src=src, dst=dst, sport=sport, dport=dport, proto="udp", payload=payload, seq=np.nan, flags=np.nan,
+                quic_long=quic_long)
+
+
+def quic_flow(start, port, n, first_long):
+    """n개 패킷, 짝수 번째는 폰→서버. first_long이면 핸드셰이크(long header)부터 잡힌 연결."""
+    return [
+        udp(start + i * 0.001, *((PHONE, port, "5.6.7.8", 443) if i % 2 == 0 else ("5.6.7.8", 443, PHONE, port)),
+            1200 + i, quic_long=first_long and i < 2)
+        for i in range(n)
+    ]
 
 
 @pytest.fixture
@@ -36,11 +48,8 @@ def packets() -> pd.DataFrame:
         udp(0.200, PHONE, 50003, "8.8.8.8", 53, 40),
         udp(0.210, "8.8.8.8", 53, PHONE, 50003, 80),
     ]
-    # QUIC 플로우: 35개 패킷 → 앞 30개만
-    rows += [
-        udp(0.300 + i * 0.001, *((PHONE, 50002, "5.6.7.8", 443) if i % 2 == 0 else ("5.6.7.8", 443, PHONE, 50002)), 1200 + i)
-        for i in range(35)
-    ]
+    rows += quic_flow(0.300, 50002, 35, first_long=True)  # 35개 → 앞 30개만
+    rows += quic_flow(0.400, 50004, 5, first_long=False)  # 캡처 전에 열린 QUIC 연결 → 기본값으로 빠진다
     return pd.DataFrame(rows)
 
 
@@ -50,6 +59,11 @@ def test_flows_shape_and_filters(packets):
     assert ppi.dtype == np.float32
     assert list(meta["proto"]) == ["tcp", "udp"]
     assert list(meta["ppi_len"]) == [3, 30]
+
+
+def test_offset_is_seconds_from_capture_start(packets):
+    _, meta = flows_from_packets(packets)
+    np.testing.assert_allclose(meta["offset"], [0.0, 0.3])
 
 
 def test_tcp_flow_skips_acks_and_retransmissions(packets):
@@ -71,8 +85,9 @@ def test_quic_flow_truncated_to_30(packets):
 
 
 def test_filters_can_be_turned_off(packets):
-    _, meta = flows_from_packets(packets, server_ports=None, drop_partial_tcp=False)
-    assert len(meta) == 4
+    _, meta = flows_from_packets(packets, server_ports=None, drop_partial=False)
+    assert len(meta) == 5
+    assert list(meta["starts_with_handshake"]) == [True, False, False, True, False]
     assert set(meta["server_port"]) == {443, 53, 50001}  # SYN이 없으면 첫 패킷을 보낸 서버가 클라이언트로 잡힌다
 
 
@@ -85,21 +100,45 @@ def test_empty_input():
 def test_packets_from_tshark():
     csv = (
         "frame.time_epoch,ip.src,ip.dst,ipv6.src,ipv6.dst,tcp.srcport,tcp.dstport,udp.srcport,udp.dstport,"
-        "tcp.len,udp.length,tcp.seq,tcp.flags\n"
-        "1760000000.000000,10.0.0.2,1.2.3.4,,,50000,443,,,0,,0,0x0002\n"
-        "1760000000.100000,,,fd00::2,2001:db8::1,,,50002,443,,1208,,\n"
+        "tcp.len,udp.length,tcp.seq,tcp.flags,quic.header_form\n"
+        "1760000000.000000,10.0.0.2,1.2.3.4,,,50000,443,,,0,,0,0x0002,\n"
+        "1760000000.100000,,,fd00::2,2001:db8::1,,,50002,443,,1208,,,1\n"
+        "1760000000.200000,,,fd00::2,2001:db8::1,,,50002,443,,108,,,False\n"
     )
     pk = packets_from_tshark(csv)
-    assert list(pk["proto"]) == ["tcp", "udp"]
-    assert list(pk["src"]) == ["10.0.0.2", "fd00::2"]
-    assert list(pk["dport"]) == [443, 443]
-    assert list(pk["payload"]) == [0, 1200]  # UDP 헤더 8바이트 제외
+    assert list(pk["proto"]) == ["tcp", "udp", "udp"]
+    assert list(pk["src"]) == ["10.0.0.2", "fd00::2", "fd00::2"]
+    assert list(pk["dport"]) == [443, 443, 443]
+    assert list(pk["payload"]) == [0, 1200, 100]  # UDP 헤더 8바이트 제외
     assert pk["flags"].iloc[0] == 0x02
+    assert list(pk["quic_long"]) == [False, True, False]
+
+
+def test_build_self_collected(tmp_path, packets, monkeypatch):
+    """tshark 대신 가짜 패킷으로 — npz에 data.load_self_collected가 읽는 키가 다 들어가는지."""
+    folder = tmp_path / "self_collected"
+    folder.mkdir()
+    for name in ["youtube_1013_1.pcap", "instagram-reels_1014_1.pcap", "PCAPdroid_13_Oct.pcap"]:
+        (folder / name).touch()
+
+    def fake_pcap_to_flows(pcap):
+        ppi, meta = flows_from_packets(packets)
+        return ppi, meta.assign(**parse_pcap_name(pcap.name))
+
+    monkeypatch.setattr(preprocess, "pcap_to_flows", fake_pcap_to_flows)
+    out = build_self_collected(folder, tmp_path / "out.npz")
+    npz = np.load(out)
+    assert set(npz.files) == {"ppi", "label", "date", "session", "proto", "offset"}
+    assert npz["ppi"].shape == (4, 3, N_PACKETS)  # 이름 규칙에 맞는 파일 2개 × 플로우 2개
+    assert sorted(set(npz["label"])) == ["instagram-reels", "youtube"]
 
 
 @pytest.mark.parametrize("name, expected", [
-    ("youtube_1013_1.pcap", {"app": "youtube", "date": "1013", "session": "youtube_1013_1"}),
-    ("kakaotalk_1101_12.pcapng", {"app": "kakaotalk", "date": "1101", "session": "kakaotalk_1101_12"}),
+    ("youtube_1013_1.pcap", {"label": "youtube", "date": "1013", "session": "youtube_1013_1"}),
+    ("instagram-reels_1013_2.pcap", {"label": "instagram-reels", "date": "1013", "session": "instagram-reels_1013_2"}),
+    ("webtoon_1101_12.pcapng", {"label": "webtoon", "date": "1101", "session": "webtoon_1101_12"}),
+    ("instgram-reels_1013_1.pcap", None),  # 라벨 오타
+    ("kakaotalk_1013_1.pcap", None),  # 분류 대상이 아님
     ("YouTube_1013_1.pcap", None),  # 대문자
     ("PCAPdroid_13_Oct_15_30_00.pcap", None),  # PCAPdroid 기본 이름
     ("youtube_1013.pcap", None),  # 순번 없음
