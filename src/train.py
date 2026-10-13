@@ -1,7 +1,8 @@
 """학습·평가 — 정확도 + macro-F1 + 혼동 행렬을 runs/ 아래에 남긴다.
 
     python -m src.train --dataset cesnet --model cnn
-    python -m src.train --dataset self --model transformer --test-dates 1027,1028
+    python -m src.train --dataset self --task app --model transformer --test-dates 1027,1028
+    python -m src.train --dataset self --task screen --model cnn --skip-first 10
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.config import RUNS_DIR
+from src.config import RUNS_DIR, TASKS
 from src.data import Data, Split, load_cesnet, load_self_collected
 from src.models import MODELS, build_model
 
@@ -86,6 +87,8 @@ def main() -> None:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--cesnet-size", default="XS", choices=["XS", "S", "M", "L"])
     parser.add_argument("--train-size", type=int, default=None, help="CESNET 학습 샘플 수 제한 (빠른 실험용)")
+    parser.add_argument("--task", choices=list(TASKS), default="app", help="직접 수집: app(앱 분류) 또는 screen(인스타 화면 분류)")
+    parser.add_argument("--skip-first", type=float, default=0.0, help="직접 수집: 캡처 시작 뒤 이 초 안에 열린 플로우 제외")
     parser.add_argument("--test-dates", default=None, help="직접 수집: 시험용 날짜 (예: 1027,1028). 없으면 마지막 3일")
     args = parser.parse_args()
 
@@ -96,7 +99,7 @@ def main() -> None:
         data = load_cesnet(size=args.cesnet_size, train_size=args.train_size)
     else:
         test_dates = args.test_dates.split(",") if args.test_dates else None
-        data = load_self_collected(test_dates=test_dates, seed=args.seed)
+        data = load_self_collected(task=args.task, skip_first_s=args.skip_first, test_dates=test_dates, seed=args.seed)
     print(json.dumps(data.condition, ensure_ascii=False, indent=2))
 
     model = build_model(args.model, len(data.classes)).to(args.device)
@@ -107,7 +110,8 @@ def main() -> None:
     test = evaluate(model, data.test, len(data.classes), args.device)
     print(f"\n시험  정확도 {test['accuracy']:.4f}  macro-F1 {test['macro_f1']:.4f}")
 
-    out = RUNS_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}_{args.dataset}_{args.model}"
+    dataset_name = args.dataset if args.dataset == "cesnet" else f"self-{args.task}"
+    out = RUNS_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}_{dataset_name}_{args.model}"
     out.mkdir(parents=True)
     metrics = {
         "accuracy": test["accuracy"],

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from src.config import CESNET_DIR, PROCESSED_DIR
+from src.config import CESNET_DIR, PROCESSED_DIR, TASKS
 
 
 @dataclass
@@ -92,16 +92,24 @@ def load_cesnet(
 
 def load_self_collected(
     path: Path = PROCESSED_DIR / "self_collected.npz",
+    task: str = "app",
+    skip_first_s: float = 0.0,
     test_dates: list[str] | None = None,
     n_test_dates: int = 3,
     val_frac: float = 0.1,
     seed: int = 0,
 ) -> Data:
-    """src.preprocess가 만든 npz → 날짜 단위 학습/검증/시험. test_dates가 없으면 마지막 n_test_dates일."""
+    """src.preprocess가 만든 npz → 날짜 단위 학습/검증/시험.
+
+    task: "app"(앱 분류) 또는 "screen"(인스타 화면 분류). config.TASKS의 라벨만 쓴다.
+    skip_first_s: 캡처 시작 뒤 이 시간 안에 열린 플로우를 뺀다 (캡처를 켤 때 몰리는 재연결 제외).
+    test_dates: 시험용 날짜. 없으면 이 과제 데이터의 마지막 n_test_dates일.
+    """
     npz = np.load(path)
-    X, apps, dates, sessions = npz["ppi"], npz["app"], npz["date"], npz["session"]
-    classes = sorted(set(apps))
-    y = np.searchsorted(classes, apps).astype(np.int64)
+    keep = np.isin(npz["label"], TASKS[task]) & (npz["offset"] >= skip_first_s)
+    X, labels, dates, sessions = (npz[key][keep] for key in ("ppi", "label", "date", "session"))
+    classes = sorted(set(labels))
+    y = np.searchsorted(classes, labels).astype(np.int64)
 
     all_dates = sorted(set(dates))
     if test_dates is None:
@@ -119,7 +127,10 @@ def load_self_collected(
         train=take(train_mask), val=take(val_mask), test=take(test_mask), classes=classes,
         condition={
             "dataset": "self_collected",
+            "task": task,
             "classes": len(classes),
+            "labels": classes,
+            "skip_first_s": skip_first_s,
             "split": "수집 날짜 단위",
             "train_dates": train_dates,
             "test_dates": sorted(test_dates),
