@@ -52,9 +52,10 @@
 
 | 과제 | 라벨 (파일 이름) | 수집 방법 |
 | --- | --- | --- |
-| **앱 분류** (본 과제) | `youtube` 유튜브 · `webtoon` 네이버웹툰 · `instagram` 인스타그램 | 앱을 완전히 끈 상태에서 캡처 시작 → 앱 열기 → 평소처럼 사용 (인스타는 피드·릴스) |
+| **앱 분류** (본 과제) | `youtube` 유튜브 · `webtoon` 네이버웹툰 · `instagram` 인스타그램 | 앱을 **강제 종료**한 상태에서 캡처 시작 → 앱 열기 → 평소처럼 사용 (인스타는 피드·릴스) |
 | **인스타 화면 분류** (추가 분석) | `instagram-reels` 릴스 · `instagram-feed` 피드 · `instagram-explore` 탐색 탭 | 인스타를 켜고 그 화면에 들어간 뒤 캡처 시작 → 그 화면에서만 사용 (피드는 켜자마자 캡처) |
 
+- 앱 분류의 「강제 종료」는 설정 → 애플리케이션 → 그 앱 → 강제 종료. 최근 앱 목록에서 밀어 닫기만 하면 앱이 백그라운드에 남아 있을 수 있다. 첫 수집 파일(`instagram_1014_1`)에서 캡처 전에 열린 QUIC 연결이 트래픽의 85%였고, 그 연결은 전처리에서 빠진다. `python -m src.preprocess`가 이런 파일에 경고를 띄운다.
 - 두 과제를 섞으면 안 되는 이유: `instagram`에도 피드·릴스 트래픽이 들어 있어 라벨이 겹치고, 화면 라벨은 캡처를 켠 시점이 달라서 모델이 앱 대신 「캡처를 언제 켰는지」를 배울 수 있다.
 - 라벨 목록은 `src/config.py`의 `TASKS` 한 곳에 있다. 여기 없는 라벨의 파일은 이름 오타로 보고 건너뛴다.
 
@@ -77,7 +78,7 @@
 
 1. **1D-CNN** — 기본 모델
 2. **작은 Transformer** — 비교 대상
-3. (선택) 랜덤포레스트 — 시간이 남으면 기준선으로
+3. 랜덤포레스트 — 기준선 (`--model rf`). 원시 PPI 90개 값을 그대로 넣는다. 딥러닝이 단순한 모델보다 얼마나 나은지 보이려고 결과 표에만 넣고, 프로토타입에는 쓰지 않는다
 
 ---
 
@@ -113,12 +114,14 @@ test_df = dataset.get_test_df()
 ### 직접 수집 방법 (PCAPdroid)
 
 1. 안드로이드 폰에 PCAPdroid 설치 (루팅 불필요)
-2. 설정에서 **대상 앱을 하나만** 선택, TLS 복호화·QUIC 차단은 끈다
+2. 설정에서 **대상 앱을 하나만** 선택, TLS 복호화·QUIC 차단은 끈다. 트래픽 덤프는 **PCAP 파일** — UDP 추출기는 패킷이 조용히 빠질 수 있고(앞 30개 패킷이 달라짐), HTTP 서버·TCP 추출기는 캡처할 때마다 PC가 같은 Wi-Fi에서 받고 있어야 한다. 저장 폴더는 `Download/PCAPdroid` (`scripts/pull_pcaps.ps1` 기본값)
+   - 라벨마다 네트워크(집 Wi-Fi·LTE 등)를 다르게 쓰지 않는다 — 모델이 앱 대신 네트워크 차이를 배울 수 있다. 같은 날 같은 네트워크에서 라벨 6개를 돌아가며 모은다
 3. 위 「분류 대상」 표의 수집 방법대로 5분 사용 → pcap 저장. 파일 하나 = 라벨 하나
 4. 라벨 6개, **매일 라벨마다 5분씩 2~3주** (하루 30분). 부담되면 화면 분류 3개는 이틀에 한 번
 5. 파일 이름 규칙: `라벨_날짜_순번.pcap` (예: `youtube_1013_1.pcap`, `instagram-reels_1013_1.pcap`)
 6. 전처리: pcap → 플로우 → 앞 30개 패킷 (tshark로 CSV 추출 → pandas)
 7. 첫날 확인: `python -m src.preprocess`가 라벨별 플로우 수와 「처음 10초」 안에 열린 플로우 수를 보여 준다. 화면 분류 파일에서 처음 몇 초에 플로우가 몰려 있으면 캡처를 켤 때 생긴 재연결일 수 있다 → 학습 때 `--skip-first`로 뺀다
+8. 자세히 보기: `notebooks/02_self_collected_explore.ipynb` — `--skip-first` 값, TCP도 쓸지(`--proto`), 라벨별 플로우 수를 여기서 정한다
 
 - 아이폰이면: PC 모바일 핫스팟에 폰을 연결하고 Wireshark로 핫스팟 인터페이스를 캡처, 앱을 하나씩만 켜서 사용
 - 유튜브·크롬은 QUIC을 써서 최신 트래픽이 자연스럽게 모인다
@@ -141,6 +144,10 @@ test_df = dataset.get_test_df()
 
 - **Streamlit** — 파이썬 파일 하나로 웹 화면. `streamlit run app.py`
 - pcap 업로드 → 플로우별 분류 결과 → 앱별 표·차트
+- 왼쪽에서 `runs/`의 학습 결과(모델) 중 하나를 고른다. 플로우는 그 모델을 학습할 때의 조건(`--proto`, `--skip-first`)대로 거른다
+- 파일 이름이 `라벨_날짜_순번.pcap`이면 그 라벨을 정답으로 본 정확도도 보여 준다
+- 시스템 지표도 함께 보인다: 처리 시간·처리량(초당 플로우 수), 저장량(pcap 대비 특징값 크기 — 플로우당 360바이트)
+- 같은 계산을 명령어로: `python -m src.predict <pcap·폴더>` — 여러 파일의 처리량·저장량을 한꺼번에 잰다 (4단계 보고용)
 - 시연 입력: 직접 수집한 pcap 중 **학습에 쓰지 않은 날짜분**
 - 화면에 시간 쓰지 말고 모델에 집중
 
@@ -173,9 +180,17 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m src.train --dataset cesnet --model cnn
 .\.venv\Scripts\python.exe -m src.train --dataset self --task app --model transformer --test-dates 1027,1028
 .\.venv\Scripts\python.exe -m src.train --dataset self --task screen --model cnn --skip-first 10
+.\.venv\Scripts\python.exe -m src.train --dataset self --task app --model cnn --proto quic        # QUIC 플로우만
+.\.venv\Scripts\python.exe -m src.train --dataset cesnet --model rf                               # 랜덤포레스트 기준선
+.\.venv\Scripts\python.exe -m src.report                                                         # 결과 표 (데이터셋 × 모델, 마크다운)
+.\.venv\Scripts\python.exe -m src.predict D:/datasets/self_collected/youtube_1027_1.pcap          # pcap 분류 + 처리량·저장량
+.\.venv\Scripts\streamlit.exe run app.py                                                         # 프로토타입
 ```
 
-학습 결과(정확도·macro-F1·측정 조건·혼동 행렬·모델 가중치)는 `runs/<시각>_<데이터>_<모델>/`에 남는다.
+학습 결과는 `runs/<시각>_<데이터>_<모델>/`에 남는다 — `metrics.json`(정확도·macro-F1·측정 조건·모델 처리량), `per_class.csv`(앱별 정밀도·재현율·F1), `confusion.csv`·`confusion.png`(혼동 행렬), `model.pt`(가중치).
+
+- 직접 수집 데이터를 학습하려면 날짜가 2일 이상 있어야 한다. 기본값은 마지막 3일을 시험용으로 쓰므로, 처음 며칠은 `--test-dates`로 시험 날짜를 직접 준다.
+- `tests/test_tshark.py`는 가짜 pcap을 만들어 진짜 tshark로 전처리 전체를 돌려 본다. tshark가 없는 PC에서는 건너뛴다.
 
 ### 폴더 구성
 
@@ -184,22 +199,26 @@ cipher_lens/         # 코드 (git 저장소 — C:/Users/jhpark/Documents/GitHu
   README.md          # 이 문서
   todo.md            # 할 일
   notebooks/         # 탐색·그래프
+    01_cesnet_explore.ipynb          # CESNET 둘러보기
+    02_self_collected_explore.ipynb  # 직접 수집 둘러보기 (--skip-first·--proto 정하기)
   src/
-    config.py        # 데이터 경로·PPI 상수
+    config.py        # 데이터 경로·PPI 상수·과제별 라벨
     preprocess.py    # pcap → 앞 30개 패킷 (간격, 방향, 크기)
     data.py          # CESNET·직접 수집 데이터 불러오기, 날짜 단위 분할
     models.py        # CNN, Transformer
     train.py         # 학습·평가
-  tests/             # 가짜 데이터로 돌리는 테스트
+    predict.py       # 학습한 모델로 pcap 분류, 처리량·저장량
+    report.py        # 결과 표, 혼동 행렬 그림
+  tests/             # 가짜 데이터로 돌리는 테스트 (test_tshark.py만 tshark 필요)
   scripts/
     pull_pcaps.ps1   # 폰 → PC pcap 받기 (adb)
-  app.py             # Streamlit 프로토타입 (4단계)
+  app.py             # Streamlit 프로토타입
   runs/              # 학습 결과 (커밋 안 함)
   requirements.txt
 
 D:/datasets/         # 데이터 (저장소 밖, 환경변수 CIPHERLENS_DATA로 바꿀 수 있음)
   CESNET-QUIC22/     # cesnet-datazoo가 받는 곳
-  self_collected/    # 직접 수집한 pcap
+  self_collected/    # 직접 수집한 pcap — 바탕 화면의 「pcap」 바로가기가 이 폴더를 연다
   processed/         # 전처리 결과 (npz)
 ```
 
