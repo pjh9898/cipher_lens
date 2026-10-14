@@ -1,56 +1,9 @@
 import numpy as np
-import pandas as pd
 import pytest
 
 import src.preprocess as preprocess
 from src.config import DIR, IPT, N_PACKETS, SIZE
 from src.preprocess import build_self_collected, flows_from_packets, packets_from_tshark, parse_pcap_name
-
-PHONE = "10.0.0.2"
-
-
-def tcp(t, src, sport, dst, dport, payload, seq, flags):
-    return dict(time=t, src=src, dst=dst, sport=sport, dport=dport, proto="tcp", payload=payload, seq=seq, flags=flags,
-                quic_long=False)
-
-
-def udp(t, src, sport, dst, dport, payload, quic_long=False):
-    return dict(time=t, src=src, dst=dst, sport=sport, dport=dport, proto="udp", payload=payload, seq=np.nan, flags=np.nan,
-                quic_long=quic_long)
-
-
-def quic_flow(start, port, n, first_long):
-    """n개 패킷, 짝수 번째는 폰→서버. first_long이면 핸드셰이크(long header)부터 잡힌 연결."""
-    return [
-        udp(start + i * 0.001, *((PHONE, port, "5.6.7.8", 443) if i % 2 == 0 else ("5.6.7.8", 443, PHONE, port)),
-            1200 + i, quic_long=first_long and i < 2)
-        for i in range(n)
-    ]
-
-
-@pytest.fixture
-def packets() -> pd.DataFrame:
-    s = "1.2.3.4"
-    rows = [
-        # TCP(TLS) 플로우: 핸드셰이크 + 데이터 + 재전송 + 순수 ACK
-        tcp(0.000, PHONE, 50000, s, 443, 0, 0, 0x02),  # SYN
-        tcp(0.010, s, 443, PHONE, 50000, 0, 0, 0x12),  # SYN-ACK
-        tcp(0.011, PHONE, 50000, s, 443, 0, 1, 0x10),  # ACK
-        tcp(0.020, PHONE, 50000, s, 443, 300, 1, 0x18),  # ClientHello
-        tcp(0.050, s, 443, PHONE, 50000, 1400, 1, 0x10),
-        tcp(0.051, s, 443, PHONE, 50000, 1400, 1, 0x10),  # 재전송 → 빠진다
-        tcp(0.060, PHONE, 50000, s, 443, 0, 301, 0x10),  # 순수 ACK → 빠진다
-        tcp(0.070, s, 443, PHONE, 50000, 200, 1401, 0x18),
-        # 캡처 전에 열린 TCP 연결 (SYN 없음) → 기본값으로 빠진다
-        tcp(0.100, s, 443, PHONE, 50001, 500, 9000, 0x18),
-        tcp(0.110, PHONE, 50001, s, 443, 100, 7000, 0x18),
-        # DNS → 443이 아니라 빠진다
-        udp(0.200, PHONE, 50003, "8.8.8.8", 53, 40),
-        udp(0.210, "8.8.8.8", 53, PHONE, 50003, 80),
-    ]
-    rows += quic_flow(0.300, 50002, 35, first_long=True)  # 35개 → 앞 30개만
-    rows += quic_flow(0.400, 50004, 5, first_long=False)  # 캡처 전에 열린 QUIC 연결 → 기본값으로 빠진다
-    return pd.DataFrame(rows)
 
 
 def test_flows_shape_and_filters(packets):
@@ -84,6 +37,21 @@ def test_quic_flow_truncated_to_30(packets):
     np.testing.assert_allclose(quic[IPT, 1:], 1.0, atol=1e-3)
 
 
+def test_ppi_does_not_depend_on_ip_or_port(packets):
+    """IP·포트를 모두 바꿔도 모델 입력은 같다 — 모델이 주소로 답을 외울 수 없다 (CLAUDE.md 모델 입력 규칙)."""
+    ppi, meta = flows_from_packets(packets)
+    ips = {ip: f"192.0.2.{i + 1}" for i, ip in enumerate(sorted(set(packets["src"]) | set(packets["dst"])))}
+    moved = packets.assign(
+        src=packets["src"].map(ips),
+        dst=packets["dst"].map(ips),
+        sport=packets["sport"].where(packets["sport"] == 443, packets["sport"] + 7000),  # 서버 포트(443)만 남긴다
+        dport=packets["dport"].where(packets["dport"] == 443, packets["dport"] + 7000),
+    )
+    moved_ppi, _ = flows_from_packets(moved)
+    np.testing.assert_array_equal(ppi, moved_ppi)
+    assert ppi.shape[1] == 3  # 간격·방향·크기 세 줄뿐
+
+
 def test_filters_can_be_turned_off(packets):
     _, meta = flows_from_packets(packets, server_ports=None, drop_partial=False)
     assert len(meta) == 5
@@ -114,23 +82,36 @@ def test_packets_from_tshark():
     assert list(pk["quic_long"]) == [False, True, False]
 
 
-def test_build_self_collected(tmp_path, packets, monkeypatch):
-    """tshark 대신 가짜 패킷으로 — npz에 data.load_self_collected가 읽는 키가 다 들어가는지."""
+@pytest.fixture
+def collected(tmp_path, packets, monkeypatch):
+    """직접 수집 폴더 — tshark 대신 파일마다 conftest의 가짜 패킷이 나온다."""
     folder = tmp_path / "self_collected"
     folder.mkdir()
     for name in ["youtube_1013_1.pcap", "instagram-reels_1014_1.pcap", "PCAPdroid_13_Oct.pcap"]:
         (folder / name).touch()
+    monkeypatch.setattr(preprocess, "run_tshark", lambda pcap: "")
+    monkeypatch.setattr(preprocess, "packets_from_tshark", lambda csv_text: packets.copy())
+    return folder
 
-    def fake_pcap_to_flows(pcap):
-        ppi, meta = flows_from_packets(packets)
-        return ppi, meta.assign(**parse_pcap_name(pcap.name))
 
-    monkeypatch.setattr(preprocess, "pcap_to_flows", fake_pcap_to_flows)
-    out = build_self_collected(folder, tmp_path / "out.npz")
+def test_build_self_collected(tmp_path, collected, capsys):
+    """npz에 data.load_self_collected가 읽는 키가 다 들어가는지."""
+    out = build_self_collected(collected, tmp_path / "out.npz")
     npz = np.load(out)
     assert set(npz.files) == {"ppi", "label", "date", "session", "proto", "offset"}
     assert npz["ppi"].shape == (4, 3, N_PACKETS)  # 이름 규칙에 맞는 파일 2개 × 플로우 2개
     assert sorted(set(npz["label"])) == ["instagram-reels", "youtube"]
+    # 443 패킷 50개 중 중간부터 잡힌 TCP 2개 + QUIC 5개
+    assert "youtube_1013_1.pcap: 플로우 2개 (중간부터 잡혀 뺀 연결 2개 = 443 패킷의 14%)\n" in capsys.readouterr().out
+
+
+def test_warns_when_app_was_already_running(tmp_path, collected, capsys, monkeypatch):
+    """앱 분류 파일만 경고한다 — 화면 분류는 앱을 켠 채 캡처하므로 중간 연결이 많은 게 정상이다."""
+    monkeypatch.setattr(preprocess, "PARTIAL_WARN", 0.1)
+    build_self_collected(collected, tmp_path / "out.npz")
+    lines = capsys.readouterr().out.splitlines()
+    assert next(line for line in lines if line.startswith("youtube_")).endswith("강제 종료하지 않고 캡처를 켠 것 같다")
+    assert "강제 종료" not in next(line for line in lines if line.startswith("instagram-reels_"))
 
 
 @pytest.mark.parametrize("name, expected", [

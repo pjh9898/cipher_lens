@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.config import DIR, IPT, LABELS, N_PACKETS, PROCESSED_DIR, SELF_COLLECTED_DIR, SIZE
+from src.config import DIR, IPT, LABELS, N_PACKETS, PROCESSED_DIR, SELF_COLLECTED_DIR, SIZE, TASKS
 
 TSHARK_FIELDS = [
     "frame.time_epoch",
@@ -45,6 +45,9 @@ TCP_ACK = 0x10
 PCAP_NAME = re.compile(r"^(?P<label>[a-z0-9-]+)_(?P<date>\d{4})_(?P<seq>\d+)\.pcap(ng)?$")
 
 PACKET_COLUMNS = ["time", "src", "dst", "sport", "dport", "proto", "payload", "seq", "flags", "quic_long"]
+
+# 앱 분류 파일에서 중간부터 잡힌 연결이 443 패킷의 이 비율을 넘으면 경고한다
+PARTIAL_WARN = 0.3
 
 
 def parse_pcap_name(name: str) -> dict | None:
@@ -107,7 +110,8 @@ def flows_from_packets(
         잘못 잡고, 앞 30개 패킷도 진짜 시작이 아니다. 인스타 화면 분류처럼 앱을 켜 둔 채 캡처를 켤 때 특히 많다.
     """
     if pk.empty:
-        empty_meta = pd.DataFrame(columns=["proto", "server_port", "start", "offset", "starts_with_handshake", "packets", "ppi_len"])
+        empty_meta = pd.DataFrame(columns=["proto", "server_port", "client_port", "start", "offset", "starts_with_handshake",
+                                           "packets", "ppi_len"])
         return np.zeros((0, 3, N_PACKETS), dtype=np.float32), empty_meta
     pk = pk.sort_values("time", kind="stable").reset_index(drop=True)
     a = pk["src"] + "|" + pk["sport"].astype(str)
@@ -125,6 +129,7 @@ def flows_from_packets(
     meta = pd.DataFrame({
         "proto": first["proto"],
         "server_port": first["dport"],
+        "client_port": first["sport"],  # 중간부터 잡힌 연결은 서버가 먼저 보내면 둘이 뒤바뀐다
         "start": first["time"],
         "offset": first["time"] - pk["time"].iloc[0],  # 캡처의 첫 패킷부터 플로우가 열릴 때까지 초
         "starts_with_handshake": syn_start.where(first["proto"] == "tcp", quic_start),
@@ -189,10 +194,20 @@ def build_self_collected(folder: Path = SELF_COLLECTED_DIR, out: Path = PROCESSE
         print(f"건너뜀 (이름 규칙 위반): {p.name}")
     ppis, metas = [], []
     for p in valid:
-        ppi, meta = pcap_to_flows(p)
-        print(f"{p.name}: 플로우 {len(meta)}개")
+        packets = packets_from_tshark(run_tshark(p))
+        ppi, meta = flows_from_packets(packets)
+        name = parse_pcap_name(p.name)
+        # 중간부터 잡혀 뺀 연결이 트래픽 대부분이면, 앱 분류 파일은 캡처 전에 앱이 살아 있었던 것이다
+        _, every = flows_from_packets(packets, server_ports=None, drop_partial=False)
+        every = every[(every["server_port"] == 443) | (every["client_port"] == 443)]
+        partial = every[~every["starts_with_handshake"]]
+        share = partial["packets"].sum() / max(every["packets"].sum(), 1)
+        line = f"{p.name}: 플로우 {len(meta)}개 (중간부터 잡혀 뺀 연결 {len(partial)}개 = 443 패킷의 {share:.0%})"
+        if name["label"] in TASKS["app"] and share > PARTIAL_WARN:
+            line += " ← 앱을 강제 종료하지 않고 캡처를 켠 것 같다"
+        print(line)
         ppis.append(ppi)
-        metas.append(meta)
+        metas.append(meta.assign(**name))
     if not metas:
         raise SystemExit(f"{folder}에 처리할 pcap이 없다.")
     meta = pd.concat(metas, ignore_index=True)
