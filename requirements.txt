@@ -1,0 +1,10 @@
+# GPU(NVIDIA)가 있으면 torch를 먼저 CUDA 버전으로 설치한 뒤 이 파일을 설치한다:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
+torch
+cesnet-datazoo
+scikit-learn
+pandas
+matplotlib
+streamlit
+ipykernel
+pytest
