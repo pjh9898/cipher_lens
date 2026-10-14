@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from src.config import CESNET_DIR, PROCESSED_DIR, TASKS
+from src.config import CESNET_DIR, PROCESSED_DIR, PROTOS, TASKS
 
 
 @dataclass
@@ -75,12 +75,13 @@ def load_cesnet(
         return Split(np.stack(df["PPI"].to_numpy()).astype(np.float32), df["APP"].to_numpy(np.int64))
 
     train, val, test = take(dataset.get_train_df()), take(dataset.get_val_df()), take(dataset.get_test_df())
-    classes = dataset.get_known_apps()
+    classes = [str(app) for app in dataset.get_known_apps()]
     return Data(
         train=train, val=val, test=test, classes=classes,
         condition={
             "dataset": f"CESNET-QUIC22 {size}",
             "classes": len(classes),
+            "proto": "quic",
             "split": "주차 단위",
             "train_period": train_period,
             "test_period": test_period,
@@ -94,6 +95,7 @@ def load_self_collected(
     path: Path = PROCESSED_DIR / "self_collected.npz",
     task: str = "app",
     skip_first_s: float = 0.0,
+    proto: str = "all",
     test_dates: list[str] | None = None,
     n_test_dates: int = 3,
     val_frac: float = 0.1,
@@ -103,18 +105,24 @@ def load_self_collected(
 
     task: "app"(앱 분류) 또는 "screen"(인스타 화면 분류). config.TASKS의 라벨만 쓴다.
     skip_first_s: 캡처 시작 뒤 이 시간 안에 열린 플로우를 뺀다 (캡처를 켤 때 몰리는 재연결 제외).
+    proto: "all" · "quic" · "tcp" (config.PROTOS).
     test_dates: 시험용 날짜. 없으면 이 과제 데이터의 마지막 n_test_dates일.
     """
     npz = np.load(path)
-    keep = np.isin(npz["label"], TASKS[task]) & (npz["offset"] >= skip_first_s)
+    keep = np.isin(npz["label"], TASKS[task]) & (npz["offset"] >= skip_first_s) & np.isin(npz["proto"], PROTOS[proto])
+    if not keep.any():
+        raise ValueError(f"{task} 과제({', '.join(TASKS[task])})에 남는 플로우가 없다 (proto={proto}, skip_first_s={skip_first_s}).")
     X, labels, dates, sessions = (npz[key][keep] for key in ("ppi", "label", "date", "session"))
-    classes = sorted(set(labels))
+    # numpy 문자열 대신 str — model.pt를 torch.load 기본값(weights_only)으로 다시 불러올 수 있게
+    classes = sorted(set(labels.tolist()))
     y = np.searchsorted(classes, labels).astype(np.int64)
 
-    all_dates = sorted(set(dates))
+    all_dates = sorted(set(dates.tolist()))
     if test_dates is None:
         test_dates = all_dates[-n_test_dates:]
     train_mask, test_mask = split_by_date(dates, test_dates)
+    if not train_mask.any():
+        raise ValueError(f"학습할 날짜가 없다 — 수집 날짜 {all_dates}가 모두 시험 날짜다. --test-dates로 시험 날짜를 줄인다.")
     val_mask = np.zeros(len(y), dtype=bool)
     val_mask[train_mask] = pick_val_sessions(sessions[train_mask], val_frac, np.random.default_rng(seed))
     train_mask &= ~val_mask
@@ -122,7 +130,7 @@ def load_self_collected(
     def take(mask: np.ndarray) -> Split:
         return Split(X[mask], y[mask])
 
-    train_dates = sorted(set(dates[train_mask | val_mask]))
+    train_dates = sorted(set(dates[train_mask | val_mask].tolist()))
     return Data(
         train=take(train_mask), val=take(val_mask), test=take(test_mask), classes=classes,
         condition={
@@ -130,6 +138,7 @@ def load_self_collected(
             "task": task,
             "classes": len(classes),
             "labels": classes,
+            "proto": proto,
             "skip_first_s": skip_first_s,
             "split": "수집 날짜 단위",
             "train_dates": train_dates,

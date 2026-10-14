@@ -16,25 +16,6 @@ def test_split_by_date_rejects_unknown_date():
         split_by_date(np.array(["1013"]), ["1099"])
 
 
-@pytest.fixture
-def npz_path(tmp_path):
-    """라벨 4개(앱 2 + 화면 2) × 5일 × 하루 2세션 × 세션당 플로우 4개 (offset 0, 5, 20, 60초)."""
-    labels, dates, sessions, offsets = [], [], [], []
-    for label in ["youtube", "instagram", "instagram-reels", "instagram-feed"]:
-        for day in ["1013", "1014", "1015", "1016", "1017"]:
-            for seq in [1, 2]:
-                for offset in [0.0, 5.0, 20.0, 60.0]:
-                    labels.append(label)
-                    dates.append(day)
-                    sessions.append(f"{label}_{day}_{seq}")
-                    offsets.append(offset)
-    n = len(labels)
-    path = tmp_path / "self_collected.npz"
-    np.savez(path, ppi=np.random.rand(n, 3, 30).astype(np.float32), label=np.array(labels), date=np.array(dates),
-             session=np.array(sessions), proto=np.array(["udp"] * n), offset=np.array(offsets))
-    return path
-
-
 def test_app_task(npz_path):
     data = load_self_collected(npz_path, task="app", n_test_dates=2, val_frac=0.2)
     assert data.classes == ["instagram", "youtube"]  # 화면 라벨은 섞이지 않는다
@@ -56,3 +37,22 @@ def test_explicit_test_dates(npz_path):
     data = load_self_collected(npz_path, test_dates=["1013"])
     assert data.condition["test_dates"] == ["1013"]
     assert "1013" not in data.condition["train_dates"]
+
+
+def test_proto_filter(npz_path):
+    for proto in ["quic", "tcp"]:
+        data = load_self_collected(npz_path, proto=proto)
+        assert len(data.train.y) + len(data.val.y) + len(data.test.y) == 40  # 앱 라벨 80개 플로우의 절반씩
+        assert data.condition["proto"] == proto
+
+
+def test_labels_and_dates_are_plain_str(npz_path):
+    """numpy 문자열이 섞이면 model.pt를 torch.load 기본값으로 다시 불러올 수 없다."""
+    data = load_self_collected(npz_path)
+    for value in [*data.classes, *data.condition["train_dates"], *data.condition["test_dates"]]:
+        assert type(value) is str
+
+
+def test_too_few_dates_for_training(npz_path):
+    with pytest.raises(ValueError, match="--test-dates"):
+        load_self_collected(npz_path, n_test_dates=5)  # 수집 날짜 5일이 모두 시험으로 가면 학습할 날이 없다

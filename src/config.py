@@ -18,6 +18,9 @@ TASKS = {
 }
 LABELS = tuple(label for labels in TASKS.values() for label in labels)
 
+# 학습에 쓸 프로토콜 (train --proto). 전처리는 443 포트만 남기므로 udp = QUIC, tcp = TLS.
+PROTOS = {"all": ("tcp", "udp"), "quic": ("udp",), "tcp": ("tcp",)}
+
 # 학습 결과 (모델 가중치·지표) — .gitignore
 RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
 
