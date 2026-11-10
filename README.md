@@ -56,6 +56,7 @@
 | **인스타 화면 분류** (추가 분석) | `instagram-reels` 릴스 · `instagram-feed` 피드 · `instagram-explore` 탐색 탭 | 인스타를 켜고 그 화면에 들어간 뒤 캡처 시작 → 그 화면에서만 사용 (피드는 켜자마자 캡처) |
 
 - 앱 분류의 「강제 종료」는 설정 → 애플리케이션 → 그 앱 → 강제 종료. 최근 앱 목록에서 밀어 닫기만 하면 앱이 백그라운드에 남아 있을 수 있다. 첫 수집 파일(`instagram_1014_1`)에서 캡처 전에 열린 QUIC 연결이 트래픽의 85%였고, 그 연결은 전처리에서 빠진다. `python -m src.preprocess`가 이런 파일에 경고를 띄운다.
+- 라벨을 바꿀 때마다 PCAPdroid 대상 앱이 그 앱 하나뿐인지 확인하고, 앞에서 쓴 앱도 강제 종료한다. `youtube_1015_1`에는 인스타 연결이 플로우 33개 중 12개 섞였다 (캡처 75초에 백그라운드 재접속 3개, 끝나기 1초 전 9개). 전처리가 이런 연결을 SNI로 골라 빼고, 몇 개 뺐는지 보여 준다.
 - 두 과제를 섞으면 안 되는 이유: `instagram`에도 피드·릴스 트래픽이 들어 있어 라벨이 겹치고, 화면 라벨은 캡처를 켠 시점이 달라서 모델이 앱 대신 「캡처를 언제 켰는지」를 배울 수 있다.
 - 라벨 목록은 `src/config.py`의 `TASKS` 한 곳에 있다. 여기 없는 라벨의 파일은 이름 오타로 보고 건너뛴다.
 
@@ -72,6 +73,7 @@
   - 직접 수집 데이터는 443 포트(TLS·QUIC) 플로우만 쓴다.
   - 캡처 전에 열려 중간부터 잡힌 연결은 뺀다 — 앞부분이 잘려 있어서. TCP는 SYN, QUIC은 핸드셰이크(long header) 패킷으로 시작하지 않으면 중간부터 잡힌 것이다. 인스타 화면 분류처럼 앱을 켜 둔 채 캡처를 켤 때 특히 많다.
 - **IP·포트·SNI(접속 도메인)는 입력에 넣지 않는다.** 넣으면 모델이 그걸로 답을 외운다.
+  - SNI는 전처리에서 다른 앱의 연결을 빼는 데만 쓴다 (예: 유튜브 파일에 섞인 인스타 연결). 앱별 도메인은 `src/config.py`의 `APP_DOMAINS`. CESNET-QUIC22도 SNI로 라벨을 붙였다. 여러 앱이 같이 쓰는 광고·분석 연결은 빼지 않는다 (8절).
 - 페이로드 바이트는 넣지 않는다 (암호문이라 잡음).
 
 ### 모델
@@ -110,14 +112,19 @@ test_df = dataset.get_test_df()
 ```
 
 학습·시험이 서로 다른 주차라 「날짜 단위로 나누기」가 자동으로 지켜진다.
+`ALL_KNOWN`은 배경 트래픽 3개와 학습 플로우가 100개 미만인 앱(XS에서는 uber)을 빼서, XS에서는 **앱 101개**로 학습·평가한다. 검증 세트는 학습 주차에서 무작위 20%(datazoo 기본값)다.
 
 ### 직접 수집 방법 (PCAPdroid)
 
 1. 안드로이드 폰에 PCAPdroid 설치 (루팅 불필요)
 2. 설정에서 **대상 앱을 하나만** 선택, TLS 복호화·QUIC 차단은 끈다. 트래픽 덤프는 **PCAP 파일** — UDP 추출기는 패킷이 조용히 빠질 수 있고(앞 30개 패킷이 달라짐), HTTP 서버·TCP 추출기는 캡처할 때마다 PC가 같은 Wi-Fi에서 받고 있어야 한다. 저장 폴더는 `Download/PCAPdroid` (`scripts/pull_pcaps.ps1` 기본값)
    - 라벨마다 네트워크(집 Wi-Fi·LTE 등)를 다르게 쓰지 않는다 — 모델이 앱 대신 네트워크 차이를 배울 수 있다. 같은 날 같은 네트워크에서 라벨 6개를 돌아가며 모은다
-3. 위 「분류 대상」 표의 수집 방법대로 5분 사용 → pcap 저장. 파일 하나 = 라벨 하나
-4. 라벨 6개, **매일 라벨마다 5분씩 2~3주** (하루 30분). 부담되면 화면 분류 3개는 이틀에 한 번
+3. 위 「분류 대상」 표의 수집 방법대로 사용 → pcap 저장. 파일 하나 = 라벨 하나
+   - 앱 분류: **1분 반 이상** 쓰고 저장한다. 플로우 수는 쓴 시간이 아니라 앱을 켠 횟수에 비례한다 — 인스타는 켤 때마다 연결 10~14개가 16초 안에 다 열리고, 느리게 차는 연결도 67초쯤이면 앞 30개가 찬다 (10/15 실측: 3분 캡처 13개, 1분 반 캡처 10·14·11개)
+   - 화면 분류: 5분. 앱을 켠 채 캡처해서 새로 열리는 연결만 남으므로 첫 파일을 보고 다시 정한다
+4. **평일 3주(15일)**, 앱 분류는 라벨마다 하루 1번. 화면 분류 3개는 부담되면 이틀에 한 번
+   - 하루에 여러 번 켜기보다 날짜를 늘린다. 같은 날 다시 켜서 모은 연결은 서로 비슷하다 (같은 종류끼리 앞 8개쯤은 거의 같고, 30개 중 절반쯤이 같은 값)
+   - 시험 데이터가 작으면 시험 날짜를 늘리고(`--test-dates`), 앱마다 개수가 다른 것(웹툰이 4배쯤 많음)은 학습 때 클래스 가중치로 맞춘다
 5. 파일 이름 규칙: `라벨_날짜_순번.pcap` (예: `youtube_1013_1.pcap`, `instagram-reels_1013_1.pcap`)
 6. 전처리: pcap → 플로우 → 앞 30개 패킷 (tshark로 CSV 추출 → pandas)
 7. 첫날 확인: `python -m src.preprocess`가 라벨별 플로우 수와 「처음 10초」 안에 열린 플로우 수를 보여 준다. 화면 분류 파일에서 처음 몇 초에 플로우가 몰려 있으면 캡처를 켤 때 생긴 재연결일 수 있다 → 학습 때 `--skip-first`로 뺀다
@@ -137,6 +144,7 @@ test_df = dataset.get_test_df()
 - 직접 수집 데이터의 앱 분류와 인스타 화면 분류는 따로 학습·평가한다. 계획서의 「응용 분류」는 앱 분류다.
 - 결과 표는 데이터셋(CESNET / 직접 수집 앱 분류 / 인스타 화면 분류)별로 CNN vs Transformer.
 - 프로토타입 시스템 지표: 초당 처리 플로우 수, 저장량.
+- **실험은 검증 점수로 고른다** — 시험 점수를 보고 설정을 고르면 시험 세트에 맞춘 결과가 된다. 정확도를 올리려고 해 본 것은 [experiments.md](experiments.md)에 하나씩 적는다 (발표 자료의 바탕).
 
 ---
 
@@ -177,12 +185,14 @@ py -3.12 -m venv .venv
 .\scripts\pull_pcaps.ps1                                          # 폰에서 새 pcap 받기 + 수집 현황 (adb 필요)
 .\.venv\Scripts\python.exe -m src.preprocess --status             # 수집 현황만 (파일 이름 검사, 앱×날짜 파일 수)
 .\.venv\Scripts\python.exe -m src.preprocess                      # 직접 수집 pcap → D:/datasets/processed/self_collected.npz
-.\.venv\Scripts\python.exe -m src.train --dataset cesnet --model cnn
+.\.venv\Scripts\python.exe -m src.train --dataset cesnet --model cnn --class-weight none --epochs 40 --lr-schedule cosine --width 128  # CESNET 설정 (아래)
 .\.venv\Scripts\python.exe -m src.train --dataset self --task app --model transformer --test-dates 1027,1028
 .\.venv\Scripts\python.exe -m src.train --dataset self --task screen --model cnn --skip-first 10
 .\.venv\Scripts\python.exe -m src.train --dataset self --task app --model cnn --proto quic        # QUIC 플로우만
-.\.venv\Scripts\python.exe -m src.train --dataset cesnet --model rf                               # 랜덤포레스트 기준선
-.\.venv\Scripts\python.exe -m src.report                                                         # 결과 표 (데이터셋 × 모델, 마크다운)
+.\.venv\Scripts\python.exe -m src.train --dataset cesnet --model rf --class-weight none           # 랜덤포레스트 기준선
+.\.venv\Scripts\python.exe -m src.train --dataset self --task app --model cnn --skip-packets 5                # 앞 패킷 5개(핸드셰이크)를 가리고
+.\.venv\Scripts\python.exe -m src.report                                                         # 결과 표 (데이터셋 × 모델 × 조건, 시드 평균 ± 표준편차, 마크다운)
+.\.venv\Scripts\python.exe -m src.ensemble runs/<run> runs/<run>                                 # 앙상블 (모델 여러 개의 확률 평균) 점수·처리량
 .\.venv\Scripts\python.exe -m src.predict D:/datasets/self_collected/youtube_1027_1.pcap          # pcap 분류 + 처리량·저장량
 .\.venv\Scripts\streamlit.exe run app.py                                                         # 프로토타입
 ```
@@ -190,6 +200,12 @@ py -3.12 -m venv .venv
 학습 결과는 `runs/<시각>_<데이터>_<모델>/`에 남는다 — `metrics.json`(정확도·macro-F1·측정 조건·모델 처리량), `per_class.csv`(앱별 정밀도·재현율·F1), `confusion.csv`·`confusion.png`(혼동 행렬), `model.pt`(가중치).
 
 - 직접 수집 데이터를 학습하려면 날짜가 2일 이상 있어야 한다. 기본값은 마지막 3일을 시험용으로 쓰므로, 처음 며칠은 `--test-dates`로 시험 날짜를 직접 준다.
+- 검증 세트는 학습 날짜에서 라벨마다 파일을 통째로 10%(적어도 1개) 뺀다. 가장 좋은 에포크를 고르는 데만 쓴다.
+- 앱마다 플로우 수가 다른 것은 손실에 앱별 가중치(개수에 반비례)를 곱해 맞춘다 — `--class-weight balanced`(기본값). 끄려면 `--class-weight none`. CESNET은 `none`으로 돌린다 — 앱이 101개라 가중치가 0.15~233배로 벌어져 드문 앱의 정밀도가 무너진다 (11/10 CNN 검증 macro-F1: balanced 0.614 · none 0.744).
+- 직접 수집은 플로우가 적어서(학습 600개 안팎) 기본값(배치 512 · 20 에포크)으로는 덜 학습된다. `--batch-size 64 --epochs 50`으로 돌린다.
+- CESNET XS(학습 157만 · 시험 255만 플로우)는 `--epochs 40 --lr-schedule cosine`으로 돌린다 — 기본값 20 에포크로는 덜 학습되고, 학습률을 고정하면 검증 점수가 에포크마다 2~3%p씩 오르내린다 (코사인으로 줄이면 평평해진다 — [experiments.md](experiments.md) E5). CNN · Transformer 모두 `--width 128`(폭 2배 — 파라미터 CNN 약 11만 → 41만 · Transformer 약 8만 → 28만)로 돌린다 — 기본 폭 64는 학습 데이터에서도 90~91%에 그쳐 모델이 작았다 (검증 macro-F1: CNN 76.6 → 81.7 · Transformer 76.6 → 82.9, E8b · E10b). GTX 1660 Ti에서 CNN 29분 · Transformer 58분 (폭 128). 학습은 하나씩 돌린다 — 동시에 돌려도 빨라지지 않고, metrics.json의 학습 시간·처리량만 틀어진다. RF는 나무 100그루가 메모리를 약 7GB 쓴다.
+- `--skip-packets N`은 앞 N개 패킷(핸드셰이크)을 가리고 학습·평가한다 — 첫 패킷 크기 같은 통신 라이브러리 지문 없이도 맞히는지 보는 실험. 결과 표 「조건」에 「앞 패킷 N개 가림」으로 따로 남고, 그 모델로 추론하면 같은 패킷을 가린다. `src.predict`와 프로토타입은 기본으로 가장 최근 직접 수집 모델을 쓰므로(CESNET 모델은 목록 뒤로 간다), 가리지 않은 모델로 시연하려면 `--run`(프로토타입은 왼쪽 목록)으로 고른다.
+- `src.ensemble`은 학습한 모델 여러 개의 앱별 확률을 평균해 검증·시험 점수와 처리량을 보인다 (결과 표에는 넣지 않는다). CESNET은 폭 128 CNN 3개 + 폭 128 Transformer 3개의 앙상블이 시험 85.4%로 단일 모델(시드 3개 평균 CNN 82.6% · Transformer 82.5%)보다 높지만, 처리량은 단일 CNN의 약 1/8이다 ([experiments.md](experiments.md) E6 · E7 · E9 · E11).
 - `tests/test_tshark.py`는 가짜 pcap을 만들어 진짜 tshark로 전처리 전체를 돌려 본다. tshark가 없는 PC에서는 건너뛴다.
 
 ### 폴더 구성
@@ -198,6 +214,7 @@ py -3.12 -m venv .venv
 cipher_lens/         # 코드 (git 저장소 — C:/Users/jhpark/Documents/GitHub/, OneDrive 밖)
   README.md          # 이 문서
   todo.md            # 할 일
+  experiments.md     # 정확도 올리기 실험 기록 (발표용)
   notebooks/         # 탐색·그래프
     01_cesnet_explore.ipynb          # CESNET 둘러보기
     02_self_collected_explore.ipynb  # 직접 수집 둘러보기 (--skip-first·--proto 정하기)
@@ -209,6 +226,7 @@ cipher_lens/         # 코드 (git 저장소 — C:/Users/jhpark/Documents/GitHu
     train.py         # 학습·평가
     predict.py       # 학습한 모델로 pcap 분류, 처리량·저장량
     report.py        # 결과 표, 혼동 행렬 그림
+    ensemble.py      # 앙상블 (모델 여러 개의 확률 평균) 점수·처리량
   tests/             # 가짜 데이터로 돌리는 테스트 (test_tshark.py만 tshark 필요)
   scripts/
     pull_pcaps.ps1   # 폰 → PC pcap 받기 (adb)
@@ -244,9 +262,10 @@ D:/datasets/         # 데이터 (저장소 밖, 환경변수 CIPHERLENS_DATA로
 
 - **본인 기기 트래픽만 수집한다.** 공용 와이파이에서 남의 트래픽을 잡으면 통신비밀보호법 위반. PCAPdroid는 그 폰의 트래픽만 본다.
 - **pcap 원본은 공개하지 않는다.** 암호화돼 있어도 접속한 서버 주소·도메인 기록이 남는다. 공유가 필요하면 추출한 특징값만.
-- **라벨은 완벽하지 않다** — 앱 하나만 골라도 광고·분석 서버 연결이 섞인다. 한계로 적는다.
-- **PCAPdroid는 VPN 방식**이라 실제 망 패킷과 크기·타이밍이 조금 다를 수 있다. 한계로 적는다.
+- **라벨은 완벽하지 않다** — 앱 하나만 골라도 광고·분석 서버 연결이 섞인다 (10/15: 웹툰 플로우 82개 중 12개가 Braze·AppsFlyer·Firebase, 유튜브 21개 중 7개가 구글 광고·검색). 한계로 적는다.
+- **PCAPdroid는 VPN 방식**이라 실제 망 패킷과 크기·타이밍이 다르다. 특히 TCP 패킷이 실제 망 최대(1460바이트)보다 크게 잡힌다 — 10/15 웹툰은 최대 9,960바이트, 앞 30개 패킷의 31%가 1460바이트를 넘었다. QUIC(UDP)은 그대로다 (최대 1,252바이트). 한계로 적는다.
 - **인스타 화면 라벨은 앱 라벨보다 더 거칠다** — 화면에 들어간 뒤 새로 열린 연결만 남기지만, 앱이 화면과 상관없이 미리 받아 두는 트래픽(다른 화면 콘텐츠 선로딩, 분석 서버)이 섞일 수 있다. 한계로 적는다.
+- **직접 수집은 통신 라이브러리 지문만으로도 거의 맞힐 수 있다** — 앱 3개가 서로 다른 통신 라이브러리를 써서, 첫 패킷(QUIC Initial · ClientHello) 크기만으로도 93%를 맞힌다 (10/15 플로우 124개, 규칙을 정한 데이터로 잰 낙관적 값). CESNET은 여러 서비스를 같은 브라우저로 써서 첫 패킷 크기가 거의 같고(69%가 1250바이트), 같은 규칙이 16.5%다. 앞 패킷 5개(핸드셰이크)를 가리고 학습해도 두 데이터 모두 남은 패킷으로 대부분 맞히고, 떨어지는 폭도 비슷하다 (가린 뒤에도 패킷이 남는 플로우에서 정확도 하락: CNN 직접 수집 2.6%p · CESNET 0.8%p, Transformer 4.9%p · 3.7%p — macro-F1은 CESNET이 더 떨어진다. 11/10). 모델이 핸드셰이크 지문에만 기대지는 않지만, 남은 패킷에도 서버 응답 크기 같은 라이브러리 차이가 남을 수 있다. 그래서 직접 수집의 높은 정확도를 앱 분류 일반의 성능으로 읽지 않는다. 한계로 적는다.
 
 ---
 
