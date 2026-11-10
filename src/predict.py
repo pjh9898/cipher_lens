@@ -1,9 +1,10 @@
 """학습한 모델로 pcap 분류 — 프로토타입(app.py)과 처리량·저장량 측정이 같이 쓴다.
 
-플로우는 모델을 학습할 때의 조건(metrics.json의 condition — proto, skip_first_s)대로 거른다.
+플로우는 모델을 학습할 때의 조건(metrics.json의 condition — proto, skip_first_s)대로 거르고,
+학습 때 앞 패킷을 가렸으면(skip_packets) 똑같이 가린다.
 학습과 시연이 같은 입력을 보게 하려고.
 
-    python -m src.predict D:/datasets/self_collected/youtube_1027_1.pcap        # runs/의 가장 최근 모델
+    python -m src.predict D:/datasets/self_collected/youtube_1027_1.pcap        # runs/의 가장 최근 직접 수집 모델
     python -m src.predict --run runs/20261101-120000_self-app_cnn "D:/datasets/self_collected/*_1027_*.pcap"
     python -m src.predict D:/datasets/self_collected                            # 폴더 안 pcap 전부
 """
@@ -21,6 +22,7 @@ import torch
 from torch import nn
 
 from src.config import N_PACKETS, PROTOS, RUNS_DIR
+from src.data import skip_packets
 from src.models import build_model
 from src.preprocess import flows_from_packets, packets_from_tshark, parse_pcap_name, run_tshark
 
@@ -51,15 +53,26 @@ class Classifier:
         return self.metrics.get("condition", {})
 
 
+def is_self_collected(run: Path) -> bool:
+    """직접 수집 데이터로 학습한 모델인지 (metrics.json의 condition)."""
+    metrics_path = Path(run) / "metrics.json"
+    if not metrics_path.exists():
+        return False
+    return json.loads(metrics_path.read_text(encoding="utf-8")).get("condition", {}).get("dataset") == "self_collected"
+
+
 def list_runs(root: Path = RUNS_DIR) -> list[Path]:
-    """model.pt가 있는 학습 결과 폴더, 최근 것부터 (폴더 이름이 시각으로 시작한다)."""
-    return sorted((p.parent for p in Path(root).glob("*/model.pt")), reverse=True)
+    """model.pt가 있는 학습 결과 폴더 — 직접 수집 모델이 먼저, 그 안에서 최근 것부터 (폴더 이름이 시각으로 시작한다).
+    맨 앞이 src.predict·프로토타입의 기본 모델이다. CESNET 모델은 더 최근이어도 뒤로 보낸다 —
+    시연 pcap은 직접 수집이라, CESNET 앱 101개로 분류하면 정답 라벨과 맞지 않는다."""
+    runs = sorted((p.parent for p in Path(root).glob("*/model.pt")), reverse=True)
+    return sorted(runs, key=lambda run: not is_self_collected(run))  # 정렬이 안정적이라 최근 순서는 그대로
 
 
 def load_classifier(run: Path, device: str | None = None) -> Classifier:
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(Path(run) / "model.pt", map_location=device)
-    model = build_model(ckpt["model"], len(ckpt["classes"]))
+    model = build_model(ckpt["model"], len(ckpt["classes"]), ckpt.get("width"))  # width가 없는 예전 모델은 기본 폭
     model.load_state_dict(ckpt["state_dict"])
     model = model.to(device).eval()
     predict_proba(model, np.zeros((0, 3, N_PACKETS), dtype=np.float32), device)  # GPU 준비 시간을 처리량에서 빼려고 미리 한 번
@@ -103,7 +116,7 @@ def classify_pcap(clf: Classifier, pcap: Path) -> PcapResult:
     t1 = time.perf_counter()
     ppi, meta = flows_from_packets(packets)
     keep = keep_like_training(meta, clf.condition)
-    ppi, meta = ppi[keep], meta[keep].reset_index(drop=True)
+    ppi, meta = skip_packets(ppi[keep], clf.condition.get("skip_packets", 0)), meta[keep].reset_index(drop=True)
     t2 = time.perf_counter()
     proba = predict_proba(clf.model, ppi, clf.device)
     t3 = time.perf_counter()
@@ -145,7 +158,7 @@ def expand_paths(paths: list[str]) -> list[Path]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pcaps", nargs="+", help="pcap 파일·폴더·패턴")
-    parser.add_argument("--run", type=Path, default=None, help="학습 결과 폴더 (기본: runs/의 가장 최근)")
+    parser.add_argument("--run", type=Path, default=None, help="학습 결과 폴더 (기본: runs/의 가장 최근 직접 수집 모델)")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 

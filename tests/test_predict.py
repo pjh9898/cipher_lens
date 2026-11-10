@@ -4,6 +4,7 @@ import pytest
 
 import src.predict as predict
 from src.config import N_PACKETS
+from src.data import skip_packets
 from src.models import MODELS, build_model
 from src.predict import classify_pcap, expand_paths, list_runs, load_classifier, predict_proba, summarize
 
@@ -23,6 +24,16 @@ def test_list_runs_newest_first(make_run):
     newer = make_run("20261102-090000_cesnet_cnn")
     (older.parent / "20261103-000000_broken").mkdir()  # model.pt 없음 → 빠진다
     assert list_runs(older.parent) == [newer, older]
+
+
+def test_list_runs_puts_self_collected_first(make_run):
+    """기본 모델(맨 앞)은 가장 최근 직접 수집 모델 — CESNET 모델은 더 최근이어도 뒤로 간다 (시연 pcap은 직접 수집)."""
+    self_older = make_run("20261101-120000_self-app_cnn", {"dataset": "self_collected", "task": "app"})
+    cesnet = make_run("20261102-090000_cesnet_cnn", {"dataset": "CESNET-QUIC22 XS"})
+    self_newer = make_run("20261103-090000_self-app_transformer", {"dataset": "self_collected", "task": "app"},
+                          model="transformer")
+    cesnet_newest = make_run("20261104-090000_cesnet_transformer", {"dataset": "CESNET-QUIC22 XS"}, model="transformer")
+    assert list_runs(self_older.parent) == [self_newer, self_older, cesnet_newest, cesnet]
 
 
 @pytest.fixture
@@ -57,6 +68,20 @@ def test_classify_pcap_filters_like_training(tmp_path, make_run, fake_tshark):
     result = classify_pcap(skip_first, pcap)
     assert list(result.flows["offset"]) == pytest.approx([0.3])
     assert result.true_label is None and result.accuracy is None  # 이름 규칙에 맞지 않는 파일
+
+
+def test_classify_pcap_hides_packets_like_training(tmp_path, make_run, fake_tshark, monkeypatch):
+    """학습 때 앞 패킷을 가린 모델이면 추론 입력도 똑같이 가린다."""
+    pcap = tmp_path / "capture.pcap"
+    pcap.touch()
+    plain = load_classifier(make_run("a"), device="cpu")
+    hidden = load_classifier(make_run("b", {"skip_packets": 2}), device="cpu")
+    seen = []
+    real = predict.predict_proba
+    monkeypatch.setattr(predict, "predict_proba", lambda model, X, device: seen.append(X) or real(model, X, device))
+    classify_pcap(plain, pcap)
+    classify_pcap(hidden, pcap)
+    np.testing.assert_array_equal(seen[1], skip_packets(seen[0], 2))
 
 
 def test_no_accuracy_when_label_is_not_a_model_class(tmp_path, make_run, fake_tshark):
