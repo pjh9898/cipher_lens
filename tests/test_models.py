@@ -23,6 +23,18 @@ def test_forward_shape(name):
     assert torch.isfinite(out).all()
 
 
+@pytest.mark.parametrize("name", MODELS)
+def test_width_changes_model_size(name):
+    """width는 모델 폭만 바꾼다 — 넓히면 파라미터가 늘고, 입출력 모양은 같다. 기본값은 64."""
+    def n_params(model):
+        return sum(p.numel() for p in model.parameters())
+
+    default, wide = build_model(name, 5), build_model(name, 5, width=128)
+    assert n_params(build_model(name, 5, width=64)) == n_params(default)
+    assert n_params(wide) > 2 * n_params(default)
+    assert wide.eval()(random_ppi(2, [30, 5])).shape == (2, 5)
+
+
 def test_transformer_ignores_padding():
     """채운 자리(0)는 결과에 영향을 주지 않는다."""
     torch.manual_seed(0)

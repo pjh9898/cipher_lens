@@ -62,7 +62,10 @@ class SmallTransformer(nn.Module):
 
 
 MODELS = {"cnn": CNN1D, "transformer": SmallTransformer}
+WIDTH_ARG = {"cnn": "width", "transformer": "d_model"}  # --width가 바꾸는 인자 (기본값 64)
 
 
-def build_model(name: str, n_classes: int) -> nn.Module:
-    return MODELS[name](n_classes)
+def build_model(name: str, n_classes: int, width: int | None = None) -> nn.Module:
+    """width — CNN은 첫 합성곱의 채널 수(뒤쪽은 그 2배), Transformer는 d_model. None이면 기본값(64)."""
+    kwargs = {} if width is None else {WIDTH_ARG[name]: width}
+    return MODELS[name](n_classes, **kwargs)
