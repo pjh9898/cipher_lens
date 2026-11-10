@@ -5,12 +5,12 @@ condition에는 85% 같은 숫자를 보고할 때 함께 적을 측정 조건�
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 
-from src.config import CESNET_DIR, PROCESSED_DIR, PROTOS, TASKS
+from src.config import CESNET_DIR, DIR, IPT, PROCESSED_DIR, PROTOS, TASKS
 
 
 @dataclass
@@ -37,13 +37,45 @@ def split_by_date(dates: np.ndarray, test_dates: list[str]) -> tuple[np.ndarray,
     return ~test, test
 
 
-def pick_val_sessions(sessions: np.ndarray, frac: float, rng: np.random.Generator) -> np.ndarray:
-    """학습 데이터 중 일부 세션(파일)을 통째로 검증용으로 뺀다. 세션 하나가 양쪽에 나뉘지 않는다."""
-    unique = np.unique(sessions)
-    if len(unique) < 2:
-        return np.zeros(len(sessions), dtype=bool)
-    n_val = max(1, round(len(unique) * frac))
-    return np.isin(sessions, rng.choice(unique, n_val, replace=False))
+def pick_val_sessions(sessions: np.ndarray, labels: np.ndarray, frac: float, rng: np.random.Generator) -> np.ndarray:
+    """학습 데이터 중 일부 세션(파일)을 통째로 검증용으로 뺀다. 세션 하나가 양쪽에 나뉘지 않는다.
+
+    라벨마다 따로 세션의 frac만큼(적어도 1개) 고른다. 세션이 1개뿐인 라벨은 학습에 남긴다.
+    전체에서 무작위로 고르면 파일이 적을 때 어떤 앱이 검증에서 통째로 빠지고, 검증 macro-F1로 고르는 에포크가 틀어진다
+    (11/09 첫 학습: 파일 2개만 뽑혀 유튜브가 빠짐)."""
+    val = np.zeros(len(sessions), dtype=bool)
+    for label in np.unique(labels):
+        mine = labels == label
+        unique = np.unique(sessions[mine])
+        if len(unique) < 2:
+            continue
+        n_val = max(1, round(len(unique) * frac))
+        val |= mine & np.isin(sessions, rng.choice(unique, n_val, replace=False))
+    return val
+
+
+def skip_packets(X: np.ndarray, n: int) -> np.ndarray:
+    """앞 n개 패킷(ClientHello·QUIC Initial 같은 핸드셰이크)을 지우고 나머지를 앞으로 당긴다. 뒤는 0으로 채운다.
+    새 첫 패킷의 간격은 0으로 둔다 — 플로우 첫 패킷처럼, 가린 패킷과의 간격도 남기지 않으려고.
+    패킷이 n개 이하인 플로우는 빈 입력(모두 0)이 된다. 빼지 않는다 — 시험 세트를 가리지 않은 결과와 같게 두려고."""
+    if n <= 0:
+        return X
+    out = np.zeros_like(X)
+    out[:, :, :X.shape[2] - n] = X[:, :, n:]
+    out[:, IPT, 0] = 0
+    return out
+
+
+def hide_handshake(data: Data, n: int) -> Data:
+    """학습·검증·시험 모두 앞 n개 패킷을 가린다 (skip_packets). 통신 라이브러리 지문(첫 패킷 크기 등) 없이도 맞히는지 보는 실험.
+    condition에 skip_packets를 남겨 추론(src.predict)도 같게 가리고, 가린 뒤 빈 입력이 된 플로우 수도 적는다."""
+    def hide(split: Split) -> Split:
+        return Split(skip_packets(split.X, n), split.y)
+
+    empty = {name: int(((split.X[:, DIR] != 0).sum(1) <= n).sum())
+             for name, split in (("train", data.train), ("val", data.val), ("test", data.test))}
+    return replace(data, train=hide(data.train), val=hide(data.val), test=hide(data.test),
+                   condition={**data.condition, "skip_packets": n, "empty_after_skip": empty})
 
 
 def load_cesnet(
@@ -124,7 +156,7 @@ def load_self_collected(
     if not train_mask.any():
         raise ValueError(f"학습할 날짜가 없다 — 수집 날짜 {all_dates}가 모두 시험 날짜다. --test-dates로 시험 날짜를 줄인다.")
     val_mask = np.zeros(len(y), dtype=bool)
-    val_mask[train_mask] = pick_val_sessions(sessions[train_mask], val_frac, np.random.default_rng(seed))
+    val_mask[train_mask] = pick_val_sessions(sessions[train_mask], y[train_mask], val_frac, np.random.default_rng(seed))
     train_mask &= ~val_mask
 
     def take(mask: np.ndarray) -> Split:
@@ -143,7 +175,7 @@ def load_self_collected(
             "split": "수집 날짜 단위",
             "train_dates": train_dates,
             "test_dates": sorted(test_dates),
-            "val": f"학습 날짜 중 세션(파일) {val_frac:.0%}",
+            "val": f"학습 날짜 중 라벨마다 세션(파일) {val_frac:.0%} (적어도 1개)",
             "flows": {"train": int(train_mask.sum()), "val": int(val_mask.sum()), "test": int(test_mask.sum())},
         },
     )

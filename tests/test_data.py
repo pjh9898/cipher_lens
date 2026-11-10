@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 
-from src.data import load_self_collected, split_by_date
+from src.config import DIR, IPT, SIZE
+from src.data import hide_handshake, load_self_collected, pick_val_sessions, skip_packets, split_by_date
 
 
 def test_split_by_date_keeps_dates_apart():
@@ -51,6 +52,47 @@ def test_labels_and_dates_are_plain_str(npz_path):
     data = load_self_collected(npz_path)
     for value in [*data.classes, *data.condition["train_dates"], *data.condition["test_dates"]]:
         assert type(value) is str
+
+
+def test_val_has_every_label(npz_path):
+    """검증 세트에 모든 앱이 들어간다 — 무작위로 세션을 고르면 파일이 적을 때 앱 하나가 통째로 빠질 수 있다."""
+    for seed in range(5):
+        data = load_self_collected(npz_path, task="app", seed=seed)
+        assert set(data.val.y.tolist()) == {0, 1}
+
+
+def test_pick_val_sessions_keeps_single_session_label_in_train():
+    sessions = np.array(["a_1", "a_1", "a_2", "b_1"])
+    labels = np.array([0, 0, 0, 1])
+    val = pick_val_sessions(sessions, labels, frac=0.1, rng=np.random.default_rng(0))
+    assert val.sum() in (1, 2) and not val[3]  # a는 세션 하나를 통째로, b는 세션이 하나뿐이라 학습에 남김
+    assert len(set(sessions[val])) == 1
+
+
+def test_skip_packets_shifts_left_and_pads():
+    X = np.zeros((2, 3, 30), dtype=np.float32)
+    X[:, IPT] = np.arange(30)  # 간격 0, 1, 2, ...
+    X[:, DIR] = 1
+    X[:, SIZE] = np.arange(100, 130)
+    X[1, :, 4:] = 0  # 두 번째 플로우는 패킷 4개뿐
+    out = skip_packets(X, 2)
+    np.testing.assert_array_equal(out[0, SIZE, :28], np.arange(102, 130))
+    assert out[0, IPT, 0] == 0 and out[0, IPT, 1] == 3  # 새 첫 패킷 간격은 0, 그 뒤는 그대로
+    assert not out[:, :, 28:].any()  # 뒤는 0으로 채움
+    assert (out[1, DIR] != 0).sum() == 2
+    assert not skip_packets(X, 4)[1].any()  # 패킷이 n개 이하면 빈 입력
+    np.testing.assert_array_equal(skip_packets(X, 0), X)
+
+
+def test_hide_handshake_keeps_every_flow(npz_path):
+    data = load_self_collected(npz_path, task="app", n_test_dates=2)
+    hidden = hide_handshake(data, 5)
+    for before, after in ((data.train, hidden.train), (data.val, hidden.val), (data.test, hidden.test)):
+        assert len(after.y) == len(before.y)  # 시험 세트가 가리지 않은 결과와 같다
+        np.testing.assert_array_equal(after.X, skip_packets(before.X, 5))
+    assert hidden.condition["skip_packets"] == 5
+    assert hidden.condition["empty_after_skip"] == {"train": 0, "val": 0, "test": 0}
+    assert "skip_packets" not in data.condition  # 원래 Data는 그대로
 
 
 def test_too_few_dates_for_training(npz_path):
