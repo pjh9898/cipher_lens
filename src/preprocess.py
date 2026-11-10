@@ -8,8 +8,9 @@ CESNET-QUIC22의 PPI와 같은 모양 (N, 3, 30)으로 만든다.
 - 클라이언트 = 플로우의 첫 패킷을 보낸 쪽.
 - 캡처 전에 열려 중간부터 잡힌 플로우(TCP는 SYN, QUIC은 long header로 시작하지 않음)는 뺀다.
 - offset = 캡처 시작부터 플로우가 열릴 때까지 걸린 초. 캡처를 켤 때 몰리는 재연결을 거를 때 쓴다.
+- 직접 수집 파일에 섞인 다른 앱의 연결은 SNI(접속 도메인)로 골라 뺀다 (config.APP_DOMAINS).
 
-IP·포트는 플로우를 묶고 거르는 데만 쓴다. 모델 입력(ppi)에는 넣지 않는다.
+IP·포트·SNI는 플로우를 묶고 거르는 데만 쓴다. 모델 입력(ppi)과 npz에는 넣지 않는다.
 
     python -m src.preprocess --status   # 파일 이름 검사 + 라벨×날짜 파일 수 (tshark 불필요)
     python -m src.preprocess            # 직접 수집 pcap 전체 → processed/self_collected.npz
@@ -26,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.config import DIR, IPT, LABELS, N_PACKETS, PROCESSED_DIR, SELF_COLLECTED_DIR, SIZE, TASKS
+from src.config import APP_DOMAINS, DIR, IPT, LABELS, N_PACKETS, PROCESSED_DIR, SELF_COLLECTED_DIR, SIZE, TASKS
 
 TSHARK_FIELDS = [
     "frame.time_epoch",
@@ -34,6 +35,7 @@ TSHARK_FIELDS = [
     "tcp.srcport", "tcp.dstport", "udp.srcport", "udp.dstport",
     "tcp.len", "udp.length", "tcp.seq", "tcp.flags",
     "quic.header_form",  # 1 = long header (핸드셰이크), 0 = short header (연결 도중)
+    "tls.handshake.extensions_server_name",  # SNI — TLS·QUIC의 ClientHello에만 있다. 다른 앱 연결을 거르는 데만 쓴다
 ]
 # ICMP 오류 메시지 안에 든 TCP·UDP 헤더는 뺀다
 TSHARK_FILTER = "(tcp or udp) and not icmp and not icmpv6"
@@ -44,7 +46,7 @@ TCP_ACK = 0x10
 # 직접 수집 파일 이름: 라벨_날짜_순번.pcap (예: youtube_1013_1.pcap, instagram-reels_1013_1.pcap)
 PCAP_NAME = re.compile(r"^(?P<label>[a-z0-9-]+)_(?P<date>\d{4})_(?P<seq>\d+)\.pcap(ng)?$")
 
-PACKET_COLUMNS = ["time", "src", "dst", "sport", "dport", "proto", "payload", "seq", "flags", "quic_long"]
+PACKET_COLUMNS = ["time", "src", "dst", "sport", "dport", "proto", "payload", "seq", "flags", "quic_long", "sni"]
 
 # 앱 분류 파일에서 중간부터 잡힌 연결이 443 패킷의 이 비율을 넘으면 경고한다
 PARTIAL_WARN = 0.3
@@ -59,6 +61,17 @@ def parse_pcap_name(name: str) -> dict | None:
     return {"label": m["label"], "date": m["date"], "session": Path(name).stem}
 
 
+def domain_app(sni) -> str | None:
+    """SNI가 속한 앱 (config.APP_DOMAINS). 모르는 도메인이거나 SNI가 없으면 None."""
+    if not isinstance(sni, str):
+        return None
+    host = sni.lower().rstrip(".")
+    for app, domains in APP_DOMAINS.items():
+        if any(host == d or host.endswith("." + d) for d in domains):
+            return app
+    return None
+
+
 def find_tshark() -> str:
     path = shutil.which("tshark") or r"C:\Program Files\Wireshark\tshark.exe"
     if not Path(path).exists():
@@ -68,15 +81,16 @@ def find_tshark() -> str:
 
 def run_tshark(pcap: Path) -> str:
     """pcap → 패킷마다 한 줄인 CSV 문자열."""
+    # quote=d: 값마다 따옴표로 감싼다 — SNI에 쉼표가 들어 있어도 CSV가 깨지지 않게
     cmd = [find_tshark(), "-r", str(pcap), "-n", "-Y", TSHARK_FILTER, "-T", "fields",
-           "-E", "header=y", "-E", "separator=,", "-E", "occurrence=f"]
+           "-E", "header=y", "-E", "separator=,", "-E", "occurrence=f", "-E", "quote=d"]
     for field in TSHARK_FIELDS:
         cmd += ["-e", field]
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=True).stdout
 
 
 def packets_from_tshark(csv_text: str) -> pd.DataFrame:
-    """tshark CSV → 패킷 표 (time, src, dst, sport, dport, proto, payload, seq, flags, quic_long)."""
+    """tshark CSV → 패킷 표 (time, src, dst, sport, dport, proto, payload, seq, flags, quic_long, sni)."""
     if not csv_text.strip():
         return pd.DataFrame(columns=PACKET_COLUMNS)
     raw = pd.read_csv(io.StringIO(csv_text), dtype=str)
@@ -94,6 +108,7 @@ def packets_from_tshark(csv_text: str) -> pd.DataFrame:
         "flags": raw["tcp.flags"].map(lambda v: int(v, 0), na_action="ignore"),
         # tshark 버전에 따라 불리언을 1/0 또는 True/False로 쓴다
         "quic_long": raw["quic.header_form"].isin(["1", "True", "true"]),
+        "sni": raw["tls.handshake.extensions_server_name"],
     })
 
 
@@ -111,7 +126,7 @@ def flows_from_packets(
     """
     if pk.empty:
         empty_meta = pd.DataFrame(columns=["proto", "server_port", "client_port", "start", "offset", "starts_with_handshake",
-                                           "packets", "ppi_len"])
+                                           "packets", "sni", "ppi_len"])
         return np.zeros((0, 3, N_PACKETS), dtype=np.float32), empty_meta
     pk = pk.sort_values("time", kind="stable").reset_index(drop=True)
     a = pk["src"] + "|" + pk["sport"].astype(str)
@@ -134,6 +149,8 @@ def flows_from_packets(
         "offset": first["time"] - pk["time"].iloc[0],  # 캡처의 첫 패킷부터 플로우가 열릴 때까지 초
         "starts_with_handshake": syn_start.where(first["proto"] == "tcp", quic_start),
         "packets": pk.groupby("flow").size(),
+        # 플로우에서 처음 나온 SNI. QUIC은 ClientHello가 Initial 두 개에 나뉘면 두 번째 패킷에 붙는다
+        "sni": pk.groupby("flow")["sni"].first(),
     })
     keep = pd.Series(True, index=meta.index)
     if server_ports is not None:
@@ -197,12 +214,18 @@ def build_self_collected(folder: Path = SELF_COLLECTED_DIR, out: Path = PROCESSE
         packets = packets_from_tshark(run_tshark(p))
         ppi, meta = flows_from_packets(packets)
         name = parse_pcap_name(p.name)
+        # 다른 앱의 연결 (PCAPdroid 대상 앱 설정 실수 등)은 뺀다. SNI가 없거나 모르는 도메인이면 남긴다
+        apps = meta["sni"].map(domain_app)
+        other = (apps.notna() & (apps != name["label"].split("-")[0])).to_numpy()  # instagram-reels → instagram
+        ppi, meta = ppi[~other], meta[~other].reset_index(drop=True)
         # 중간부터 잡혀 뺀 연결이 트래픽 대부분이면, 앱 분류 파일은 캡처 전에 앱이 살아 있었던 것이다
         _, every = flows_from_packets(packets, server_ports=None, drop_partial=False)
         every = every[(every["server_port"] == 443) | (every["client_port"] == 443)]
         partial = every[~every["starts_with_handshake"]]
         share = partial["packets"].sum() / max(every["packets"].sum(), 1)
         line = f"{p.name}: 플로우 {len(meta)}개 (중간부터 잡혀 뺀 연결 {len(partial)}개 = 443 패킷의 {share:.0%})"
+        if other.any():
+            line += " · 다른 앱 연결 뺌: " + ", ".join(f"{app} {n}개" for app, n in apps[other].value_counts().items())
         if name["label"] in TASKS["app"] and share > PARTIAL_WARN:
             line += " ← 앱을 강제 종료하지 않고 캡처를 켠 것 같다"
         print(line)

@@ -18,6 +18,16 @@ TASKS = {
 }
 LABELS = tuple(label for labels in TASKS.values() for label in labels)
 
+# 앱별 도메인. 직접 수집 파일에 다른 앱의 연결이 섞이면(PCAPdroid 대상 앱 설정 실수 등) 전처리에서 SNI로 골라 뺀다.
+# SNI는 거르는 데만 쓰고 모델 입력에는 넣지 않는다 (CESNET-QUIC22도 SNI로 라벨을 붙였다).
+# 여러 앱이 같이 쓰는 광고·분석 도메인(doubleclick, firebase 등)은 넣지 않는다 — 라벨 노이즈로 남긴다.
+# 화면 분류 라벨은 '-' 앞이 앱 이름이다 (instagram-reels → instagram).
+APP_DOMAINS = {
+    "youtube": ("youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "youtubei.googleapis.com"),
+    "webtoon": ("naver.com", "pstatic.net", "navercorp.com"),
+    "instagram": ("instagram.com", "cdninstagram.com", "facebook.com", "fbcdn.net"),
+}
+
 # 학습에 쓸 프로토콜 (train --proto). 전처리는 443 포트만 남기므로 udp = QUIC, tcp = TLS.
 PROTOS = {"all": ("tcp", "udp"), "quic": ("udp",), "tcp": ("tcp",)}
 

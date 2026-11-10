@@ -11,21 +11,22 @@ from src.models import build_model
 PHONE = "10.0.0.2"
 
 
-def tcp(t, src, sport, dst, dport, payload, seq, flags):
+def tcp(t, src, sport, dst, dport, payload, seq, flags, sni=np.nan):
     return dict(time=t, src=src, dst=dst, sport=sport, dport=dport, proto="tcp", payload=payload, seq=seq, flags=flags,
-                quic_long=False)
+                quic_long=False, sni=sni)
 
 
-def udp(t, src, sport, dst, dport, payload, quic_long=False):
+def udp(t, src, sport, dst, dport, payload, quic_long=False, sni=np.nan):
     return dict(time=t, src=src, dst=dst, sport=sport, dport=dport, proto="udp", payload=payload, seq=np.nan, flags=np.nan,
-                quic_long=quic_long)
+                quic_long=quic_long, sni=sni)
 
 
-def quic_flow(start, port, n, first_long):
-    """n개 패킷, 짝수 번째는 폰→서버. first_long이면 핸드셰이크(long header)부터 잡힌 연결."""
+def quic_flow(start, port, n, first_long, sni=np.nan):
+    """n개 패킷, 짝수 번째는 폰→서버. first_long이면 핸드셰이크(long header)부터 잡힌 연결.
+    SNI는 실제처럼 두 번째 클라이언트 패킷에 붙인다 (ClientHello가 Initial 두 개에 나뉨)."""
     return [
         udp(start + i * 0.001, *((PHONE, port, "5.6.7.8", 443) if i % 2 == 0 else ("5.6.7.8", 443, PHONE, port)),
-            1200 + i, quic_long=first_long and i < 2)
+            1200 + i, quic_long=first_long and i < 2, sni=sni if i == 2 else np.nan)
         for i in range(n)
     ]
 
@@ -39,7 +40,7 @@ def packets() -> pd.DataFrame:
         tcp(0.000, PHONE, 50000, s, 443, 0, 0, 0x02),  # SYN
         tcp(0.010, s, 443, PHONE, 50000, 0, 0, 0x12),  # SYN-ACK
         tcp(0.011, PHONE, 50000, s, 443, 0, 1, 0x10),  # ACK
-        tcp(0.020, PHONE, 50000, s, 443, 300, 1, 0x18),  # ClientHello
+        tcp(0.020, PHONE, 50000, s, 443, 300, 1, 0x18, sni="www.example.com"),  # ClientHello
         tcp(0.050, s, 443, PHONE, 50000, 1400, 1, 0x10),
         tcp(0.051, s, 443, PHONE, 50000, 1400, 1, 0x10),  # 재전송 → 빠진다
         tcp(0.060, PHONE, 50000, s, 443, 0, 301, 0x10),  # 순수 ACK → 빠진다
@@ -51,7 +52,7 @@ def packets() -> pd.DataFrame:
         udp(0.200, PHONE, 50003, "8.8.8.8", 53, 40),
         udp(0.210, "8.8.8.8", 53, PHONE, 50003, 80),
     ]
-    rows += quic_flow(0.300, 50002, 35, first_long=True)  # 35개 → 앞 30개만
+    rows += quic_flow(0.300, 50002, 35, first_long=True, sni="quic.example.com")  # 35개 → 앞 30개만
     rows += quic_flow(0.400, 50004, 5, first_long=False)  # 캡처 전에 열린 QUIC 연결 → 기본값으로 빠진다
     return pd.DataFrame(rows)
 

@@ -3,7 +3,7 @@ import pytest
 
 import src.preprocess as preprocess
 from src.config import DIR, IPT, N_PACKETS, SIZE
-from src.preprocess import build_self_collected, flows_from_packets, packets_from_tshark, parse_pcap_name
+from src.preprocess import build_self_collected, domain_app, flows_from_packets, packets_from_tshark, parse_pcap_name
 
 
 def test_flows_shape_and_filters(packets):
@@ -52,6 +52,14 @@ def test_ppi_does_not_depend_on_ip_or_port(packets):
     assert ppi.shape[1] == 3  # 간격·방향·크기 세 줄뿐
 
 
+def test_ppi_does_not_depend_on_sni(packets):
+    """SNI는 플로우 정보에만 붙고 모델 입력은 그대로다 — 다른 앱 연결을 거르는 데만 쓴다."""
+    ppi, meta = flows_from_packets(packets)
+    assert list(meta["sni"]) == ["www.example.com", "quic.example.com"]  # QUIC은 두 번째 클라이언트 패킷의 SNI
+    renamed_ppi, _ = flows_from_packets(packets.assign(sni=packets["sni"].where(packets["sni"].isna(), "i.instagram.com")))
+    np.testing.assert_array_equal(ppi, renamed_ppi)
+
+
 def test_filters_can_be_turned_off(packets):
     _, meta = flows_from_packets(packets, server_ports=None, drop_partial=False)
     assert len(meta) == 5
@@ -68,10 +76,10 @@ def test_empty_input():
 def test_packets_from_tshark():
     csv = (
         "frame.time_epoch,ip.src,ip.dst,ipv6.src,ipv6.dst,tcp.srcport,tcp.dstport,udp.srcport,udp.dstport,"
-        "tcp.len,udp.length,tcp.seq,tcp.flags,quic.header_form\n"
-        "1760000000.000000,10.0.0.2,1.2.3.4,,,50000,443,,,0,,0,0x0002,\n"
-        "1760000000.100000,,,fd00::2,2001:db8::1,,,50002,443,,1208,,,1\n"
-        "1760000000.200000,,,fd00::2,2001:db8::1,,,50002,443,,108,,,False\n"
+        "tcp.len,udp.length,tcp.seq,tcp.flags,quic.header_form,tls.handshake.extensions_server_name\n"
+        "1760000000.000000,10.0.0.2,1.2.3.4,,,50000,443,,,0,,0,0x0002,,\n"
+        "1760000000.100000,,,fd00::2,2001:db8::1,,,50002,443,,1208,,,1,www.youtube.com\n"
+        '"1760000000.200000",,,"fd00::2","2001:db8::1",,,"50002","443",,"108",,,"False",\n'  # -E quote=d 모양
     )
     pk = packets_from_tshark(csv)
     assert list(pk["proto"]) == ["tcp", "udp", "udp"]
@@ -80,6 +88,7 @@ def test_packets_from_tshark():
     assert list(pk["payload"]) == [0, 1200, 100]  # UDP 헤더 8바이트 제외
     assert pk["flags"].iloc[0] == 0x02
     assert list(pk["quic_long"]) == [False, True, False]
+    assert list(pk["sni"].fillna("")) == ["", "www.youtube.com", ""]
 
 
 @pytest.fixture
@@ -112,6 +121,32 @@ def test_warns_when_app_was_already_running(tmp_path, collected, capsys, monkeyp
     lines = capsys.readouterr().out.splitlines()
     assert next(line for line in lines if line.startswith("youtube_")).endswith("강제 종료하지 않고 캡처를 켠 것 같다")
     assert "강제 종료" not in next(line for line in lines if line.startswith("instagram-reels_"))
+
+
+def test_drops_flows_of_other_apps(tmp_path, collected, packets, monkeypatch, capsys):
+    """유튜브 파일에 섞인 인스타 연결은 뺀다 (youtube_1015_1). 인스타 화면 분류 파일에서는 같은 앱이라 남는다."""
+    mixed = packets.assign(sni=packets["sni"].replace("quic.example.com", "i.instagram.com"))
+    monkeypatch.setattr(preprocess, "packets_from_tshark", lambda csv_text: mixed.copy())
+    npz = np.load(build_self_collected(collected, tmp_path / "out.npz"))
+    assert list(npz["session"]) == ["instagram-reels_1014_1", "instagram-reels_1014_1", "youtube_1013_1"]
+    assert list(npz["proto"]) == ["tcp", "udp", "tcp"]  # 유튜브 파일의 QUIC(인스타) 연결만 빠짐
+    assert "youtube_1013_1.pcap: 플로우 1개 (중간부터 잡혀 뺀 연결 2개 = 443 패킷의 14%) · 다른 앱 연결 뺌: instagram 1개\n" \
+        in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("sni, app", [
+    ("rr2---sn-ab02a0n-bh26.googlevideo.com", "youtube"),
+    ("youtubei.googleapis.com", "youtube"),
+    ("scontent-icn2-1.cdninstagram.com", "instagram"),
+    ("edge-mqtt.facebook.com", "instagram"),
+    ("image-comic.pstatic.net", "webtoon"),
+    ("Global.APIs.Naver.com.", "webtoon"),  # 대소문자·끝의 점
+    ("firebaselogging.googleapis.com", None),  # 여러 앱이 같이 쓰는 SDK → 모름
+    ("notinstagram.com", None),  # 끝만 같은 다른 도메인
+    (np.nan, None),  # SNI 없음
+])
+def test_domain_app(sni, app):
+    assert domain_app(sni) == app
 
 
 @pytest.mark.parametrize("name, expected", [

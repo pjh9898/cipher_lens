@@ -2,7 +2,7 @@
 
 PCAPdroid와 같은 raw IP pcap을 바이트로 직접 만든다. 내용은 conftest.packets와 같은 장면:
 TCP 핸드셰이크·재전송·순수 ACK, 캡처 전에 열린 TCP·QUIC 연결, DNS, IPv6 QUIC(long header로 시작).
-특히 quic.header_form이 이 tshark 버전에서 제대로 나오는지(todo 2단계) 확인한다.
+특히 quic.header_form이 이 tshark 버전에서 제대로 나오는지(todo 2단계), TCP ClientHello의 SNI가 플로우에 붙는지 확인한다.
 """
 import socket
 import struct
@@ -55,9 +55,24 @@ def ip(src: str, dst: str, proto: int, segment: bytes) -> bytes:
 
 
 def tcp(src, sport, dst, dport, seq, ack, flags, payload=0) -> bytes:
-    """payload바이트짜리 TLS 레코드(application data)를 실은 TCP 패킷."""
-    data = b"\x17\x03\x03" + (payload - 5).to_bytes(2, "big") + bytes(payload - 5) if payload else b""
+    """payload바이트짜리 TLS 레코드(application data)를 실은 TCP 패킷. payload가 bytes면 그대로 싣는다."""
+    if isinstance(payload, bytes):
+        data = payload
+    else:
+        data = b"\x17\x03\x03" + (payload - 5).to_bytes(2, "big") + bytes(payload - 5) if payload else b""
     return ip(src, dst, TCP, struct.pack("!HHIIBBHHH", sport, dport, seq, ack, 5 << 4, flags, 65535, 0, 0) + data)
+
+
+def client_hello(sni: str, size: int) -> bytes:
+    """SNI가 든 TLS ClientHello 레코드. padding 확장으로 길이를 size바이트에 맞춘다."""
+    name = sni.encode()
+    server_name = struct.pack("!HHHBH", 0x0000, len(name) + 5, len(name) + 3, 0, len(name)) + name
+    head = b"\x03\x03" + bytes(32) + b"\x00" + b"\x00\x02\x13\x01" + b"\x01\x00"  # 버전·random·세션 ID·암호군·압축
+    pad = size - (5 + 4 + len(head) + 2 + len(server_name) + 4)  # 레코드·핸드셰이크 헤더, 확장 길이, padding 헤더
+    extensions = server_name + struct.pack("!HH", 0x0015, pad) + bytes(pad)
+    body = head + struct.pack("!H", len(extensions)) + extensions
+    handshake = b"\x01" + len(body).to_bytes(3, "big") + body
+    return b"\x16\x03\x01" + struct.pack("!H", len(handshake)) + handshake
 
 
 def udp(src, sport, dst, dport, payload: bytes) -> bytes:
@@ -91,7 +106,7 @@ def pcap(tmp_path):
         (0.000, tcp(PHONE, 50000, s, 443, 1000, 0, SYN)),
         (0.010, tcp(s, 443, PHONE, 50000, 5000, 1001, SYN | ACK)),
         (0.011, tcp(PHONE, 50000, s, 443, 1001, 5001, ACK)),
-        (0.020, tcp(PHONE, 50000, s, 443, 1001, 5001, PSH | ACK, 300)),
+        (0.020, tcp(PHONE, 50000, s, 443, 1001, 5001, PSH | ACK, client_hello("www.youtube.com", 300))),
         (0.050, tcp(s, 443, PHONE, 50000, 5001, 1301, ACK, 1400)),
         (0.051, tcp(s, 443, PHONE, 50000, 5001, 1301, ACK, 1400)),  # 재전송 → 빠진다
         (0.060, tcp(PHONE, 50000, s, 443, 1301, 6401, ACK)),  # 순수 ACK → 빠진다
@@ -142,6 +157,7 @@ def test_pcap_to_flows(pcap):
     assert list(meta["proto"]) == ["tcp", "udp"]
     assert list(meta["label"]) == ["youtube", "youtube"]
     np.testing.assert_allclose(meta["offset"], [0.0, 0.3], atol=1e-6)
+    assert list(meta["sni"].fillna("")) == ["www.youtube.com", ""]  # 가짜 QUIC Initial은 복호화가 안 돼 SNI 없음
 
     tcp_flow, quic_flow = ppi
     np.testing.assert_array_equal(tcp_flow[SIZE, :4], [300, 1400, 200, 0])  # ACK·재전송 뺌
