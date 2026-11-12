@@ -7,7 +7,8 @@
 
 데이터는 첫 모델의 학습 인자(metrics.json의 args)대로 다시 만든다. 모델마다 데이터 조건이 다르면 멈춘다 —
 직접 수집은 시드가 검증 세션을 정해서, 시드가 다른 모델을 섞으면 검증 세트에 다른 모델의 학습 데이터가 들어간다.
-CESNET의 검증 분할은 시드와 상관없다 (datazoo 기본값).
+CESNET의 검증 분할은 시드와 상관없다 (datazoo 기본값). 앞 패킷 가리기(skip_packets)는 모델마다 추론 때 따로 한다 —
+가린 모델과 안 가린 모델을 섞을 수 있다.
 """
 from __future__ import annotations
 
@@ -19,14 +20,15 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import f1_score
 
-from src.data import Data
+from src.data import Data, skip_packets
 from src.predict import Classifier, load_classifier, predict_proba
 from src.report import to_markdown
 from src.train import load_data
 
-# 데이터를 정하는 학습 인자와 기본값 — 예전 학습의 args에 없는 인자는 기본값으로 본다
+# 데이터를 정하는 학습 인자와 기본값 — 예전 학습의 args에 없는 인자는 기본값으로 본다.
+# skip_packets는 넣지 않는다 — 데이터는 그대로 불러오고 모델마다 추론 때 가린다 (predict_all).
 DATA_ARGS = {"dataset": None, "cesnet_size": "XS", "train_size": None, "task": "app", "skip_first": 0.0, "proto": "all",
-             "test_dates": None, "skip_packets": 0, "val_days": 0}
+             "test_dates": None, "val_days": 0}
 CHUNK = 200_000  # 확률을 이만큼씩 구해 더한다 — CESNET 시험(255만 × 앱 101)을 한꺼번에 들고 있지 않으려고
 
 
@@ -39,8 +41,14 @@ def data_args(metrics: dict) -> dict:
     return picked
 
 
+def hidden_packets(clf: Classifier) -> int:
+    """학습 때 가린 앞 패킷 수 — 추론 때도 똑같이 가린다."""
+    return int(clf.metrics.get("args", {}).get("skip_packets") or 0)
+
+
 def predict_all(clfs: list[Classifier], X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """모델마다의 예측 (모델 수, N), 앙상블(확률 평균)의 예측 (N,), 모델마다 추론 시간(초)."""
+    """모델마다의 예측 (모델 수, N), 앙상블(확률 평균)의 예측 (N,), 모델마다 추론 시간(초).
+    X는 가리지 않은 원시 PPI다. 모델마다 학습 때처럼 앞 패킷을 가려 넣는다 (가리는 시간도 추론 시간에 넣는다)."""
     singles = np.zeros((len(clfs), len(X)), dtype=np.int64)
     ensemble = np.zeros(len(X), dtype=np.int64)
     seconds = np.zeros(len(clfs))
@@ -49,7 +57,7 @@ def predict_all(clfs: list[Classifier], X: np.ndarray) -> tuple[np.ndarray, np.n
         total = 0.0
         for i, clf in enumerate(clfs):
             began = time.perf_counter()
-            proba = predict_proba(clf.model, chunk, clf.device)
+            proba = predict_proba(clf.model, skip_packets(chunk, hidden_packets(clf)), clf.device)
             seconds[i] += time.perf_counter() - began
             singles[i, start:start + len(chunk)] = proba.argmax(1)
             total = total + proba  # 합의 argmax = 평균의 argmax
@@ -100,7 +108,7 @@ def main() -> None:
     for run, clf in zip(args.runs[1:], clfs[1:]):
         if data_args(clf.metrics) != first:
             parser.error(f"{run.name}: 데이터 조건이 첫 모델과 다르다 — {data_args(clf.metrics)} vs {first}")
-    data = load_data(clfs[0].metrics["args"])
+    data = load_data({**clfs[0].metrics["args"], "skip_packets": 0})  # 가리기는 모델마다 predict_all에서
     for run, clf in zip(args.runs, clfs):
         if clf.classes != list(data.classes):
             parser.error(f"{run.name}: 앱 목록이 데이터와 다르다")

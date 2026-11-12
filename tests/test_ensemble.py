@@ -5,9 +5,11 @@ import sys
 import numpy as np
 import pytest
 import torch
+from torch import nn
 
 import src.ensemble as ensemble
 import src.train as train
+from src.config import DIR, SIZE
 from src.data import load_self_collected
 from src.models import build_model
 from src.predict import Classifier, predict_proba
@@ -25,6 +27,25 @@ def test_predict_all_averages_probabilities_in_chunks(monkeypatch):
     assert all((singles[i] == p.argmax(1)).all() for i, p in enumerate(probas))
     assert (combined == np.mean(probas, axis=0).argmax(1)).all()
     assert (seconds > 0).all()
+
+
+class FirstPacketSize(nn.Module):
+    """첫 패킷이 500바이트를 넘으면 1번 앱, 아니면 0번 앱 — 앞 패킷을 가렸는지가 예측에 그대로 드러난다."""
+
+    def forward(self, x):
+        return nn.functional.one_hot((x[:, SIZE, 0] > 500).long(), 3).float() * 10
+
+
+def test_predict_all_hides_packets_per_model():
+    """가린 모델과 안 가린 모델을 섞어도, 모델마다 학습 때처럼 앞 패킷을 가린 입력을 받는다."""
+    X = np.zeros((4, 3, 30), dtype=np.float32)
+    X[:, DIR, :6] = 1
+    X[:, SIZE, 0], X[:, SIZE, 5] = 1000, 100  # 5개를 가리면 6번째(100바이트)가 첫 패킷이 된다
+    plain = Classifier(FirstPacketSize(), ["a", "b", "c"], {"args": {"skip_packets": 0}}, "cpu")
+    hidden = Classifier(FirstPacketSize(), ["a", "b", "c"], {"args": {"skip_packets": 5}}, "cpu")
+    singles, _, _ = ensemble.predict_all([plain, hidden], X)
+    assert (singles[0] == 1).all()
+    assert (singles[1] == 0).all()
 
 
 def train_run(tmp_path, npz_path, monkeypatch, *extra):
@@ -73,4 +94,6 @@ def test_data_args_fill_defaults_for_old_runs():
     assert ensemble.data_args({"args": {"dataset": "self", "seed": 1}})["seed"] == 1
     # 검증을 다르게 뗀 모델(시간 순서 검증)은 섞지 않는다
     assert ensemble.data_args({"args": {**new["args"], "val_days": 1}}) != ensemble.data_args(new)
+    # 앞 패킷을 가린 수만 다른 모델은 섞을 수 있다 — 가리기는 모델마다 추론 때 한다
+    assert ensemble.data_args({"args": {**new["args"], "skip_packets": 8}}) == ensemble.data_args(new)
 
