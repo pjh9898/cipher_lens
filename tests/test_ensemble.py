@@ -1,3 +1,4 @@
+import dataclasses
 import functools
 import json
 import sys
@@ -97,3 +98,45 @@ def test_data_args_fill_defaults_for_old_runs():
     # 앞 패킷을 가린 수만 다른 모델은 섞을 수 있다 — 가리기는 모델마다 추론 때 한다
     assert ensemble.data_args({"args": {**new["args"], "skip_packets": 8}}) == ensemble.data_args(new)
 
+
+def as_cesnet(run):
+    """가짜 직접 수집 모델을 CESNET 모델로 꾸민다 (드리프트 트랙은 CESNET 모델만 받는다)."""
+    path = run / "metrics.json"
+    metrics = json.loads(path.read_text(encoding="utf-8"))
+    metrics["args"]["dataset"] = "cesnet"
+    path.write_text(json.dumps(metrics, ensure_ascii=False), encoding="utf-8")
+
+
+def test_main_drift_rejects_self_collected(tmp_path, npz_path, monkeypatch):
+    train_run(tmp_path, npz_path, monkeypatch, "--model", "cnn")
+    (run,) = (tmp_path / "runs").iterdir()
+    monkeypatch.setattr(sys, "argv", ["ensemble", "--drift", str(run), "--device", "cpu"])
+    with pytest.raises(SystemExit):
+        ensemble.main()
+
+
+def test_main_drift_scores_on_drift_sets(tmp_path, npz_path, monkeypatch, capsys):
+    """--drift는 학습 데이터 대신 드리프트 트랙의 검증 · 시험으로 잰다 (가짜 데이터로 바꿔 끼움). 모델 하나도 된다."""
+    train_run(tmp_path, npz_path, monkeypatch, "--model", "cnn")
+    train_run(tmp_path, npz_path, monkeypatch, "--model", "transformer", "--seed", "1")
+    runs = sorted((tmp_path / "runs").iterdir())
+    for run in runs:
+        as_cesnet(run)
+    fake = dataclasses.replace(load_self_collected(npz_path, task="app", test_dates=["1017"]),
+                               condition={"val": "드리프트 뒤", "test_period": "W-2022-46 · W-2022-47"})
+    sizes = []
+    monkeypatch.setattr(ensemble, "load_cesnet_drift", lambda size: sizes.append(size) or fake)
+    capsys.readouterr()
+
+    monkeypatch.setattr(sys, "argv", ["ensemble", "--drift", *map(str, runs), "--device", "cpu"])
+    ensemble.main()  # 시드가 달라도 멈추지 않는다 — 드리프트 트랙은 학습 데이터와 상관없이 같은 세트를 쓴다
+    lines = capsys.readouterr().out.splitlines()
+    assert sizes == ["XS"]
+    assert "| 모델 | 드리프트 검증 정확도 | 드리프트 검증 macro-F1 | 드리프트 시험 정확도 | 드리프트 시험 macro-F1 | 처리량 (초당 플로우) |" in lines
+    assert any(line.startswith("| 앙상블 (2개) |") for line in lines)
+
+    monkeypatch.setattr(sys, "argv", ["ensemble", "--drift", str(runs[0]), "--device", "cpu"])
+    ensemble.main()
+    lines = capsys.readouterr().out.splitlines()
+    assert any(line.startswith(f"| {runs[0].name} |") for line in lines)
+    assert not any(line.startswith("| 앙상블") for line in lines)

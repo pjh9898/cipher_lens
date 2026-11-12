@@ -31,6 +31,12 @@ APP_DOMAINS = {
 # 학습에 쓸 프로토콜 (train --proto). 전처리는 443 포트만 남기므로 udp = QUIC, tcp = TLS.
 PROTOS = {"all": ("tcp", "udp"), "quic": ("udp",), "tcp": ("tcp",)}
 
+# CESNET 드리프트 트랙 (experiments.md A8). 시험 주 W-2022-45 중간(11/08~11/11)에 구글 TLS 인증서가 바뀌어
+# 구글 서비스를 못 맞히게 된다. 학습은 그대로(W-2022-44) 두고, 바뀐 뒤를 검증으로 · 다음 두 주를 시험으로 써서
+# 드리프트에 강한 모델을 고르고 잰다 (src.ensemble --drift). 기본 결과(W-2022-45 시험)는 그대로 둔다.
+DRIFT_VAL_DATES = ("20221111", "20221112", "20221113")
+DRIFT_TEST_PERIODS = ("W-2022-46", "W-2022-47")
+
 # 학습 결과 (모델 가중치·지표) — .gitignore
 RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
 

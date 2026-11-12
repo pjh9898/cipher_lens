@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from src.config import CESNET_DIR, DIR, IPT, PROCESSED_DIR, PROTOS, TASKS
+from src.config import CESNET_DIR, DIR, DRIFT_TEST_PERIODS, DRIFT_VAL_DATES, IPT, N_PACKETS, PROCESSED_DIR, PROTOS, TASKS
 
 
 @dataclass
@@ -89,6 +89,64 @@ def split_last_days(dates: list[str], n: int) -> tuple[list[str], list[str]]:
 def split_from_df(df) -> Split:
     """datazoo DataFrame → Split (원시 PPI, 앱 번호)."""
     return Split(np.stack(df["PPI"].to_numpy()).astype(np.float32), df["APP"].to_numpy(np.int64))
+
+
+def split_from_loader(dataloader) -> Split:
+    """datazoo DataLoader → Split. get_*_df + split_from_df와 값 · 순서가 같다 (배치 = (다른 필드, PPI, flowstats, 라벨)).
+    PPI · 라벨만 모은다 — DataFrame은 flowstats까지 들고 PPI를 두 번 더 복사한다. 드리프트 트랙(시험 466만 플로우)
+    측정이 다른 프로그램과 합쳐 메모리 한도에 닿아 멈춘 적이 있어 메모리를 아낀다 (E16 첫 시도, 11/12)."""
+    ppi, labels = [], []
+    for _, batch_ppi, _, batch_labels in dataloader:
+        ppi.append(np.asarray(batch_ppi, dtype=np.float32))
+        labels.append(np.asarray(batch_labels, dtype=np.int64))
+    if not ppi:
+        return Split(np.zeros((0, 3, N_PACKETS), dtype=np.float32), np.zeros(0, dtype=np.int64))
+    return Split(np.concatenate(ppi), np.concatenate(labels))
+
+
+def load_cesnet_drift(size: str = "XS", train_period: str = "W-2022-44", root: Path = CESNET_DIR) -> Data:
+    """CESNET 드리프트 트랙 (config.DRIFT_*, experiments.md A8) — 평가만 한다. 학습 세트는 불러오지 않는다 (빈 Split).
+
+    앱 목록은 load_cesnet과 같게 학습 주차에서 정한다 (ALL_KNOWN). 검증은 구글 TLS 인증서가 바뀐 뒤인
+    W-2022-45의 11/11~13, 시험은 그 뒤 두 주(W-2022-46 · 47) — 학습한 모델이 드리프트 뒤에 얼마나 버티는지 잰다.
+    시험이 커서(466만 플로우) DataFrame 없이 불러오고(split_from_loader), 작업 프로세스도 띄우지 않는다 —
+    작업 프로세스는 torch를 다시 불러와 하나에 1.6GB씩 잡는다. 순서대로 읽으므로 값 · 순서는 그대로다.
+    """
+    from cesnet_datazoo.config import AppSelection, DatasetConfig, ValidationApproach
+    from cesnet_datazoo.datasets import CESNET_QUIC22
+
+    dataset = CESNET_QUIC22(str(root), size=size)
+    test_dates = [date for period in DRIFT_TEST_PERIODS for date in dataset.time_periods[period]]
+    test_period = " · ".join(DRIFT_TEST_PERIODS)
+    dataset.set_dataset_config_and_initialize(DatasetConfig(
+        dataset=dataset,
+        apps_selection=AppSelection.ALL_KNOWN,
+        train_period_name=train_period,
+        val_approach=ValidationApproach.VALIDATION_DATES,
+        val_period_name="W-2022-45-after-drift",
+        val_dates=list(DRIFT_VAL_DATES),
+        test_period_name="-".join(DRIFT_TEST_PERIODS),
+        test_dates=test_dates,
+        val_workers=0,
+        test_workers=0,
+    ))
+    val, test = split_from_loader(dataset.get_val_dataloader()), split_from_loader(dataset.get_test_dataloader())
+    classes = [str(app) for app in dataset.get_known_apps()]
+    empty = Split(np.zeros((0, 3, N_PACKETS), dtype=np.float32), np.zeros(0, dtype=np.int64))
+    return Data(
+        train=empty, val=val, test=test, classes=classes,
+        condition={
+            "dataset": f"CESNET-QUIC22 {size}",
+            "classes": len(classes),
+            "proto": "quic",
+            "split": "주차 단위",
+            "train_period": train_period,
+            "test_period": test_period,
+            "val": f"드리프트 뒤 — W-2022-45의 {', '.join(DRIFT_VAL_DATES)} (구글 인증서가 바뀐 뒤)",
+            "track": "drift",
+            "flows": {"train": 0, "val": len(val.y), "test": len(test.y)},
+        },
+    )
 
 
 def load_cesnet(

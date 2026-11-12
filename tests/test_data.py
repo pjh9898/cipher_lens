@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 
 from src.config import DIR, IPT, SIZE
-from src.data import hide_handshake, load_self_collected, pick_val_sessions, skip_packets, split_by_date, split_last_days
+from src.data import (hide_handshake, load_self_collected, pick_val_sessions, skip_packets, split_by_date, split_from_df,
+                      split_from_loader, split_last_days)
 
 
 def test_split_by_date_keeps_dates_apart():
@@ -104,6 +105,26 @@ def test_split_last_days_keeps_time_order():
     for n in (0, 7):
         with pytest.raises(ValueError):
             split_last_days(week, n)
+
+
+def test_split_from_loader_matches_dataframe():
+    """드리프트 트랙은 DataFrame 없이 DataLoader에서 바로 모은다 — datazoo DataFrame을 거친 것과 값 · 순서가 같아야 한다."""
+    import pandas as pd
+    from cesnet_datazoo.datasets.loaders import create_df_from_dataloader
+
+    rng = np.random.default_rng(0)
+    batches = [(pd.DataFrame(),  # 다른 필드 (return_other_fields 기본값 False)
+                rng.integers(-1, 1500, (n, 3, 30)).astype(np.float32),
+                rng.random((n, 2), dtype=np.float32),  # flowstats — 쓰지 않는다
+                rng.integers(0, 101, n))
+               for n in (4, 4, 3)]  # 마지막 배치는 짧다
+    loaded = split_from_loader(batches)
+    expected = split_from_df(create_df_from_dataloader(batches, ["PPI", "BYTES", "PACKETS"], silent=True))
+    assert loaded.X.dtype == np.float32 and loaded.y.dtype == np.int64
+    np.testing.assert_array_equal(loaded.X, expected.X)
+    np.testing.assert_array_equal(loaded.y, expected.y)
+    empty = split_from_loader([])
+    assert empty.X.shape == (0, 3, 30) and empty.y.shape == (0,)
 
 
 def test_too_few_dates_for_training(npz_path):
