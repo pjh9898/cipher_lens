@@ -78,35 +78,58 @@ def hide_handshake(data: Data, n: int) -> Data:
                    condition={**data.condition, "skip_packets": n, "empty_after_skip": empty})
 
 
+def split_last_days(dates: list[str], n: int) -> tuple[list[str], list[str]]:
+    """기간의 날짜(YYYYMMDD) → (앞 날짜들, 마지막 n일). 시간 순서 검증에 쓴다."""
+    dates = sorted(dates)
+    if not 0 < n < len(dates):
+        raise ValueError(f"검증으로 뗄 날짜 수는 1 이상 {len(dates)} 미만이어야 한다 (기간 {len(dates)}일)")
+    return dates[:-n], dates[-n:]
+
+
+def split_from_df(df) -> Split:
+    """datazoo DataFrame → Split (원시 PPI, 앱 번호)."""
+    return Split(np.stack(df["PPI"].to_numpy()).astype(np.float32), df["APP"].to_numpy(np.int64))
+
+
 def load_cesnet(
     size: str = "XS",
     train_period: str = "W-2022-44",
     test_period: str = "W-2022-45",
     train_size: int | None = None,
     test_size: int | None = None,
+    val_days: int = 0,
     root: Path = CESNET_DIR,
 ) -> Data:
     """CESNET-QUIC22 → 주차 단위 학습/시험 (README 3절). 처음 부르면 데이터를 내려받는다.
 
     PPI는 변환 없이 원시값 (ppi_transform 기본값 None), 라벨은 get_known_apps() 순서의 정수다.
+    검증은 학습 주차에서 무작위 20%(datazoo 기본값)다. val_days > 0이면 학습 주차의 마지막 val_days일을 검증으로 뗀다 —
+    시간 순서 검증: 검증이 학습보다 뒤라 다음 주 시험과 더 닮는다. 대신 학습 날짜가 그만큼 줄어든다.
     """
-    from cesnet_datazoo.config import AppSelection, DatasetConfig
+    from cesnet_datazoo.config import AppSelection, DatasetConfig, ValidationApproach
     from cesnet_datazoo.datasets import CESNET_QUIC22
 
     dataset = CESNET_QUIC22(str(root), size=size)
+    if val_days:
+        train_dates, val_dates = split_last_days(dataset.time_periods[train_period], val_days)
+        periods = {"train_period_name": f"{train_period}-first{len(train_dates)}d", "train_dates": train_dates,
+                   "val_approach": ValidationApproach.VALIDATION_DATES,
+                   "val_period_name": f"{train_period}-last{val_days}d", "val_dates": val_dates}
+        val_rule = f"학습 주차의 마지막 {val_days}일 ({', '.join(val_dates)}) — 학습은 앞 {len(train_dates)}일"
+    else:
+        periods = {"train_period_name": train_period}
+        val_rule = "학습 주차에서 무작위 20% (datazoo 기본값)"
     dataset.set_dataset_config_and_initialize(DatasetConfig(
         dataset=dataset,
         apps_selection=AppSelection.ALL_KNOWN,
-        train_period_name=train_period,
         test_period_name=test_period,
         train_size=train_size or "all",
         test_known_size=test_size or "all",
+        **periods,
     ))
 
-    def take(df) -> Split:
-        return Split(np.stack(df["PPI"].to_numpy()).astype(np.float32), df["APP"].to_numpy(np.int64))
-
-    train, val, test = take(dataset.get_train_df()), take(dataset.get_val_df()), take(dataset.get_test_df())
+    train, val, test = (split_from_df(dataset.get_train_df()), split_from_df(dataset.get_val_df()),
+                        split_from_df(dataset.get_test_df()))
     classes = [str(app) for app in dataset.get_known_apps()]
     return Data(
         train=train, val=val, test=test, classes=classes,
@@ -117,7 +140,8 @@ def load_cesnet(
             "split": "주차 단위",
             "train_period": train_period,
             "test_period": test_period,
-            "val": "학습 주차에서 무작위 20% (datazoo 기본값)",
+            "val": val_rule,
+            **({"val_days": val_days} if val_days else {}),
             "flows": {"train": len(train.y), "val": len(val.y), "test": len(test.y)},
         },
     )

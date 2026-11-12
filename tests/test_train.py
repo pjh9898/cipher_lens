@@ -114,6 +114,13 @@ def test_main_rejects_width_for_forest(monkeypatch):
         train.main()
 
 
+def test_main_rejects_val_days_for_self_collected(monkeypatch):
+    """--val-days(시간 순서 검증)는 CESNET에만 — 직접 수집은 세션 단위로 검증을 뗀다."""
+    monkeypatch.setattr(sys, "argv", ["train", "--dataset", "self", "--model", "cnn", "--val-days", "1"])
+    with pytest.raises(SystemExit):
+        train.main()
+
+
 def test_class_weights_balance_classes():
     """개수가 적은 앱일수록 가중치가 크고, 앱마다 (개수 × 가중치)가 같다. 학습에 없는 앱은 0."""
     y = np.array([0] * 6 + [1] * 2)

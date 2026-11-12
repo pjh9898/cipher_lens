@@ -53,8 +53,10 @@ def test_results_table_keeps_each_condition(tmp_path):
     """같은 데이터셋·모델이어도 조건(앞 패킷 가림 등)이 다르면 최신 결과를 따로 남긴다."""
     write_metrics(tmp_path, "20261101-000000_self-app_cnn", self_collected("app"))
     write_metrics(tmp_path, "20261102-000000_self-app_cnn", self_collected("app", skip_packets=5))
+    write_metrics(tmp_path, "20261103-000000_cesnet_cnn", CESNET)
+    write_metrics(tmp_path, "20261104-000000_cesnet_cnn", {**CESNET, "val_days": 1})  # 시간 순서 검증
     table = results_table(load_runs(tmp_path))
-    assert list(table["조건"]) == ["", "앞 패킷 5개 가림"]
+    assert list(table["조건"]) == ["quic", "quic · 검증 마지막 1일", "", "앞 패킷 5개 가림"]
 
 
 def test_results_table_averages_seeds(tmp_path):

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from src.config import DIR, IPT, SIZE
-from src.data import hide_handshake, load_self_collected, pick_val_sessions, skip_packets, split_by_date
+from src.data import hide_handshake, load_self_collected, pick_val_sessions, skip_packets, split_by_date, split_last_days
 
 
 def test_split_by_date_keeps_dates_apart():
@@ -93,6 +93,17 @@ def test_hide_handshake_keeps_every_flow(npz_path):
     assert hidden.condition["skip_packets"] == 5
     assert hidden.condition["empty_after_skip"] == {"train": 0, "val": 0, "test": 0}
     assert "skip_packets" not in data.condition  # 원래 Data는 그대로
+
+
+def test_split_last_days_keeps_time_order():
+    """시간 순서 검증: 마지막 n일이 검증, 앞 날짜가 학습. 날짜가 섞여 들어와도 시간 순서로 나눈다."""
+    week = ["20221102", "20221031", "20221106", "20221101", "20221103", "20221105", "20221104"]
+    train, val = split_last_days(week, 1)
+    assert val == ["20221106"] and train == ["20221031", "20221101", "20221102", "20221103", "20221104", "20221105"]
+    assert split_last_days(week, 2)[1] == ["20221105", "20221106"]
+    for n in (0, 7):
+        with pytest.raises(ValueError):
+            split_last_days(week, n)
 
 
 def test_too_few_dates_for_training(npz_path):

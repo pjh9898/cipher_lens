@@ -71,3 +71,6 @@ def test_data_args_fill_defaults_for_old_runs():
                     "lr_schedule": "cosine"}}
     assert ensemble.data_args(old) == ensemble.data_args(new)
     assert ensemble.data_args({"args": {"dataset": "self", "seed": 1}})["seed"] == 1
+    # 검증을 다르게 뗀 모델(시간 순서 검증)은 섞지 않는다
+    assert ensemble.data_args({"args": {**new["args"], "val_days": 1}}) != ensemble.data_args(new)
+

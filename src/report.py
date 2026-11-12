@@ -64,6 +64,8 @@ def load_runs(root: Path = RUNS_DIR) -> pd.DataFrame:
             extra.append(c["proto"])
         if c.get("skip_packets"):
             extra.append(f"앞 패킷 {c['skip_packets']}개 가림")
+        if c.get("val_days"):
+            extra.append(f"검증 마지막 {c['val_days']}일")
         if m["args"].get("class_weight") == "none":
             extra.append("클래스 가중치 없음")
         if m["args"].get("lr_schedule", "constant") == "cosine":

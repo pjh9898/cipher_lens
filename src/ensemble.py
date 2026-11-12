@@ -26,7 +26,7 @@ from src.train import load_data
 
 # 데이터를 정하는 학습 인자와 기본값 — 예전 학습의 args에 없는 인자는 기본값으로 본다
 DATA_ARGS = {"dataset": None, "cesnet_size": "XS", "train_size": None, "task": "app", "skip_first": 0.0, "proto": "all",
-             "test_dates": None, "skip_packets": 0}
+             "test_dates": None, "skip_packets": 0, "val_days": 0}
 CHUNK = 200_000  # 확률을 이만큼씩 구해 더한다 — CESNET 시험(255만 × 앱 101)을 한꺼번에 들고 있지 않으려고
 
 

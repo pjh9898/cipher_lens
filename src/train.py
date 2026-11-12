@@ -3,6 +3,7 @@
     python -m src.train --dataset cesnet --model cnn --class-weight none --epochs 40
     python -m src.train --dataset cesnet --model cnn --class-weight none --epochs 40 --lr-schedule cosine
     python -m src.train --dataset cesnet --model cnn --class-weight none --epochs 40 --lr-schedule cosine --width 128
+    python -m src.train --dataset cesnet --model cnn --class-weight none --epochs 40 --lr-schedule cosine --width 128 --val-days 1
     python -m src.train --dataset self --task app --model transformer --test-dates 1027,1028
     python -m src.train --dataset self --task screen --model cnn --skip-first 10
     python -m src.train --dataset self --task app --model cnn --proto quic
@@ -151,7 +152,8 @@ def load_data(args: dict) -> Data:
     """학습 인자(argparse 값, 또는 저장한 metrics.json의 args)대로 데이터를 만든다 — 저장한 모델을 같은 조건으로
     다시 잴 때(src.ensemble)도 쓴다. 예전 학습의 args에 없는 인자는 기본값으로 본다."""
     if args["dataset"] == "cesnet":
-        data = load_cesnet(size=args.get("cesnet_size", "XS"), train_size=args.get("train_size"))
+        data = load_cesnet(size=args.get("cesnet_size", "XS"), train_size=args.get("train_size"),
+                           val_days=args.get("val_days") or 0)
     else:
         test_dates = args["test_dates"].split(",") if args.get("test_dates") else None
         data = load_self_collected(task=args.get("task", "app"), skip_first_s=args.get("skip_first", 0.0),
@@ -176,6 +178,8 @@ def main() -> None:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--cesnet-size", default="XS", choices=["XS", "S", "M", "L"])
     parser.add_argument("--train-size", type=int, default=None, help="CESNET 학습 샘플 수 제한 (빠른 실험용)")
+    parser.add_argument("--val-days", type=int, default=0,
+                        help="CESNET: 학습 주차의 마지막 N일을 검증으로 뗀다 (시간 순서 검증). 0이면 학습 주차에서 무작위 20%%")
     parser.add_argument("--task", choices=list(TASKS), default="app", help="직접 수집: app(앱 분류) 또는 screen(인스타 화면 분류)")
     parser.add_argument("--skip-first", type=float, default=0.0, help="직접 수집: 캡처 시작 뒤 이 초 안에 열린 플로우 제외")
     parser.add_argument("--proto", choices=list(PROTOS), default="all", help="직접 수집: all · quic · tcp")
@@ -190,6 +194,8 @@ def main() -> None:
         parser.error(f"--skip-packets는 0 이상 {N_PACKETS} 미만이어야 한다")
     if args.width is not None and (args.model == "rf" or args.width < 1):
         parser.error("--width는 신경망(cnn · transformer)에만 1 이상으로 쓴다")
+    if args.val_days and (args.dataset != "cesnet" or args.val_days < 0):
+        parser.error("--val-days는 CESNET에만 1 이상으로 쓴다 (직접 수집은 세션 단위 검증)")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
