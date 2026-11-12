@@ -145,6 +145,7 @@ test_df = dataset.get_test_df()
 - 결과 표는 데이터셋(CESNET / 직접 수집 앱 분류 / 인스타 화면 분류)별로 CNN vs Transformer.
 - 프로토타입 시스템 지표: 초당 처리 플로우 수, 저장량.
 - **실험은 검증 점수로 고른다** — 시험 점수를 보고 설정을 고르면 시험 세트에 맞춘 결과가 된다. 정확도를 올리려고 해 본 것은 [experiments.md](experiments.md)에 하나씩 적는다 (발표 자료의 바탕).
+- **시간이 지나도 맞히는지 따로 잰다 (CESNET 드리프트 트랙)** — 시험 주 중간에 구글 인증서가 바뀌어 같은 주 검증으로는 이런 변화에 강한 모델을 고를 수 없다 (8절). 그래서 학습은 그대로 두고, 바뀐 뒤(W-2022-45의 11/11~13)로 검증하고 그 뒤 두 주(W-2022-46 · 47)로 시험하는 평가를 따로 둔다. 기본 결과(W-2022-45 시험)와 숫자를 섞지 않는다.
 
 ---
 
@@ -185,7 +186,7 @@ py -3.12 -m venv .venv
 .\scripts\pull_pcaps.ps1                                          # 폰에서 새 pcap 받기 + 수집 현황 (adb 필요)
 .\.venv\Scripts\python.exe -m src.preprocess --status             # 수집 현황만 (파일 이름 검사, 앱×날짜 파일 수)
 .\.venv\Scripts\python.exe -m src.preprocess                      # 직접 수집 pcap → D:/datasets/processed/self_collected.npz
-.\.venv\Scripts\python.exe -m src.train --dataset cesnet --model cnn --class-weight none --epochs 40 --lr-schedule cosine --width 128  # CESNET 설정 (아래)
+.\.venv\Scripts\python.exe -m src.train --dataset cesnet --model cnn --class-weight none --epochs 40 --lr-schedule cosine --width 256  # CESNET 설정 (아래)
 .\.venv\Scripts\python.exe -m src.train --dataset self --task app --model transformer --test-dates 1027,1028
 .\.venv\Scripts\python.exe -m src.train --dataset self --task screen --model cnn --skip-first 10
 .\.venv\Scripts\python.exe -m src.train --dataset self --task app --model cnn --proto quic        # QUIC 플로우만
@@ -193,6 +194,7 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m src.train --dataset self --task app --model cnn --skip-packets 5                # 앞 패킷 5개(핸드셰이크)를 가리고
 .\.venv\Scripts\python.exe -m src.report                                                         # 결과 표 (데이터셋 × 모델 × 조건, 시드 평균 ± 표준편차, 마크다운)
 .\.venv\Scripts\python.exe -m src.ensemble runs/<run> runs/<run>                                 # 앙상블 (모델 여러 개의 확률 평균) 점수·처리량
+.\.venv\Scripts\python.exe -m src.ensemble --drift runs/<run>                                    # CESNET 드리프트 트랙으로 다시 잼 (다시 학습하지 않음)
 .\.venv\Scripts\python.exe -m src.predict D:/datasets/self_collected/youtube_1027_1.pcap          # pcap 분류 + 처리량·저장량
 .\.venv\Scripts\streamlit.exe run app.py                                                         # 프로토타입
 ```
@@ -203,9 +205,9 @@ py -3.12 -m venv .venv
 - 검증 세트는 학습 날짜에서 라벨마다 파일을 통째로 10%(적어도 1개) 뺀다. 가장 좋은 에포크를 고르는 데만 쓴다.
 - 앱마다 플로우 수가 다른 것은 손실에 앱별 가중치(개수에 반비례)를 곱해 맞춘다 — `--class-weight balanced`(기본값). 끄려면 `--class-weight none`. CESNET은 `none`으로 돌린다 — 앱이 101개라 가중치가 0.15~233배로 벌어져 드문 앱의 정밀도가 무너진다 (11/10 CNN 검증 macro-F1: balanced 0.614 · none 0.744).
 - 직접 수집은 플로우가 적어서(학습 600개 안팎) 기본값(배치 512 · 20 에포크)으로는 덜 학습된다. `--batch-size 64 --epochs 50`으로 돌린다.
-- CESNET XS(학습 157만 · 시험 255만 플로우)는 `--epochs 40 --lr-schedule cosine`으로 돌린다 — 기본값 20 에포크로는 덜 학습되고, 학습률을 고정하면 검증 점수가 에포크마다 2~3%p씩 오르내린다 (코사인으로 줄이면 평평해진다 — [experiments.md](experiments.md) E5). CNN · Transformer 모두 `--width 128`(폭 2배 — 파라미터 CNN 약 11만 → 41만 · Transformer 약 8만 → 28만)로 돌린다 — 기본 폭 64는 학습 데이터에서도 90~91%에 그쳐 모델이 작았다 (검증 macro-F1: CNN 76.6 → 81.7 · Transformer 76.6 → 82.9, E8b · E10b). GTX 1660 Ti에서 CNN 29분 · Transformer 58분 (폭 128). 학습은 하나씩 돌린다 — 동시에 돌려도 빨라지지 않고, metrics.json의 학습 시간·처리량만 틀어진다. RF는 나무 100그루가 메모리를 약 7GB 쓴다.
+- CESNET XS(학습 157만 · 시험 255만 플로우)는 `--epochs 40 --lr-schedule cosine`으로 돌린다 — 기본값 20 에포크로는 덜 학습되고, 학습률을 고정하면 검증 점수가 에포크마다 2~3%p씩 오르내린다 (코사인으로 줄이면 평평해진다 — [experiments.md](experiments.md) E5). 폭은 CNN `--width 256`(파라미터 약 157만) · Transformer `--width 128`(약 28만)로 돌린다 — 기본 폭 64(CNN 약 11만 · Transformer 약 8만)는 학습 데이터에서도 90~91%에 그쳐 모델이 작았다 (검증 macro-F1: CNN 76.6 → 81.7(폭 128) → 82.9(폭 256) · Transformer 76.6 → 82.9(폭 128), E8b · E10b · E12b). 다음 주 시험 정확도는 CNN 폭 128과 256이 같다(82.6%) — 그래서 새 설정을 비교하는 실험은 폭 128로 하고, 폭 256은 결과 표 · 앙상블에만 쓴다. GTX 1660 Ti에서 CNN 85분(폭 256) · 29분(폭 128), Transformer 58분(폭 128). 학습은 하나씩 돌린다 — 동시에 돌려도 빨라지지 않고, metrics.json의 학습 시간·처리량만 틀어진다. RF는 나무 100그루가 메모리를 약 7GB 쓴다.
 - `--skip-packets N`은 앞 N개 패킷(핸드셰이크)을 가리고 학습·평가한다 — 첫 패킷 크기 같은 통신 라이브러리 지문 없이도 맞히는지 보는 실험. 결과 표 「조건」에 「앞 패킷 N개 가림」으로 따로 남고, 그 모델로 추론하면 같은 패킷을 가린다. `src.predict`와 프로토타입은 기본으로 가장 최근 직접 수집 모델을 쓰므로(CESNET 모델은 목록 뒤로 간다), 가리지 않은 모델로 시연하려면 `--run`(프로토타입은 왼쪽 목록)으로 고른다.
-- `src.ensemble`은 학습한 모델 여러 개의 앱별 확률을 평균해 검증·시험 점수와 처리량을 보인다 (결과 표에는 넣지 않는다). CESNET은 폭 128 CNN 3개 + 폭 128 Transformer 3개의 앙상블이 시험 85.4%로 단일 모델(시드 3개 평균 CNN 82.6% · Transformer 82.5%)보다 높지만, 처리량은 단일 CNN의 약 1/8이다 ([experiments.md](experiments.md) E6 · E7 · E9 · E11).
+- `src.ensemble`은 학습한 모델 여러 개의 앱별 확률을 평균해 검증·시험 점수와 처리량을 보인다 (결과 표에는 넣지 않는다). CESNET은 폭 256 CNN 3개 + 폭 128 Transformer 3개의 앙상블이 시험 85.1%로 단일 모델(시드 3개 평균 CNN 82.6% · Transformer 82.5%)보다 높지만, 처리량은 초당 약 1.1만 플로우로 단일 CNN(폭 256)의 약 1/5이다 ([experiments.md](experiments.md) E6 · E7 · E9 · E11 · E13). 드리프트 트랙(`--drift`)의 대표는 기본 결과 앙상블 6개에 앞 패킷을 가린 폭 128 CNN 6개(`--skip-packets 5` · `8`로 학습, 시드 3개씩)를 더한 12개 앙상블로, W-2022-46 · 47 정확도 78.3% · macro-F1 77.8이다 (E16 — 기본 결과 앙상블은 72.4% · 76.1). 처리량은 초당 약 0.72만 플로우다.
 - `tests/test_tshark.py`는 가짜 pcap을 만들어 진짜 tshark로 전처리 전체를 돌려 본다. tshark가 없는 PC에서는 건너뛴다.
 
 ### 폴더 구성
@@ -266,6 +268,7 @@ D:/datasets/         # 데이터 (저장소 밖, 환경변수 CIPHERLENS_DATA로
 - **PCAPdroid는 VPN 방식**이라 실제 망 패킷과 크기·타이밍이 다르다. 특히 TCP 패킷이 실제 망 최대(1460바이트)보다 크게 잡힌다 — 10/15 웹툰은 최대 9,960바이트, 앞 30개 패킷의 31%가 1460바이트를 넘었다. QUIC(UDP)은 그대로다 (최대 1,252바이트). 한계로 적는다.
 - **인스타 화면 라벨은 앱 라벨보다 더 거칠다** — 화면에 들어간 뒤 새로 열린 연결만 남기지만, 앱이 화면과 상관없이 미리 받아 두는 트래픽(다른 화면 콘텐츠 선로딩, 분석 서버)이 섞일 수 있다. 한계로 적는다.
 - **직접 수집은 통신 라이브러리 지문만으로도 거의 맞힐 수 있다** — 앱 3개가 서로 다른 통신 라이브러리를 써서, 첫 패킷(QUIC Initial · ClientHello) 크기만으로도 93%를 맞힌다 (10/15 플로우 124개, 규칙을 정한 데이터로 잰 낙관적 값). CESNET은 여러 서비스를 같은 브라우저로 써서 첫 패킷 크기가 거의 같고(69%가 1250바이트), 같은 규칙이 16.5%다. 앞 패킷 5개(핸드셰이크)를 가리고 학습해도 두 데이터 모두 남은 패킷으로 대부분 맞히고, 떨어지는 폭도 비슷하다 (가린 뒤에도 패킷이 남는 플로우에서 정확도 하락: CNN 직접 수집 2.6%p · CESNET 0.8%p, Transformer 4.9%p · 3.7%p — macro-F1은 CESNET이 더 떨어진다. 11/10). 모델이 핸드셰이크 지문에만 기대지는 않지만, 남은 패킷에도 서버 응답 크기 같은 라이브러리 차이가 남을 수 있다. 그래서 직접 수집의 높은 정확도를 앱 분류 일반의 성능으로 읽지 않는다. 한계로 적는다.
+- **서버가 바뀌면 일부 앱을 잘 못 맞힌다 (CESNET)** — 앙상블은 같은 주 검증 94%, 다음 주 시험 85%다. 떨어진 것의 70%는 구글 서비스(google-www · gstatic · fonts)와 유튜브다. 시험 주 중간(11/08~11/11)에 이들의 재현율이 95%에서 15%까지 내려가, 그 뒤 정확도는 약 73%다 (11/11, [experiments.md](experiments.md) A7 · A8). 데이터셋 저자들은 같은 현상을 구글 TLS 인증서 변경으로 본다 (9절 Luxemburk 외). 모델이 핸드셰이크(인증서 크기)를 지름길로 쓰기 때문이다. 기본 결과 앙상블은 1~2주 뒤(W-2022-46 · 47) 72.4%다. 앞 패킷을 가리고 학습한 CNN은 덜 흔들리지만 드문 앱을 잃는다 — 핸드셰이크는 다른 많은 앱을 가려내는 신호이기도 하다 (E14). 기본 결과 앙상블에 가린 CNN을 더한 앙상블은 78.3%(macro-F1 77.8)로 덜 떨어지지만 같은 주 검증(93%)에는 못 미친다(E16) — 실제로 쓴다면 주기적으로 다시 학습해야 한다. 한계로 적는다.
 
 ---
 
@@ -281,6 +284,7 @@ D:/datasets/         # 데이터 (저장소 밖, 환경변수 CIPHERLENS_DATA로
 
 - The Sweet Danger of Sugar: Debunking Representation Learning for Encrypted Traffic Classification · <https://arxiv.org/abs/2507.16438>
 - Bias in the Shadows: Explore Shortcuts in Encrypted Network Traffic Classification · <https://arxiv.org/abs/2601.10180>
+- Luxemburk · Hynek · Čejka, 2023, "Encrypted traffic classification: the QUIC case" (TMA 2023) — CESNET-QUIC22 둘째 주(11/7~13)에 구글 서비스 재현율이 크게 떨어진 데이터 드리프트(구글 TLS 인증서 변경으로 봄), 핸드셰이크 패킷을 가리면 주가 바뀌어도 안정적 · <https://doi.org/10.23919/TMA58422.2023.10199052>
 
 ### 데이터·도구
 
